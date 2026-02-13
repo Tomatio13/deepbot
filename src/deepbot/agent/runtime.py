@@ -28,13 +28,16 @@ class AgentRuntime:
     def __init__(self, *, agent_callable: Callable[[str], Any], timeout_seconds: int) -> None:
         self._agent_callable = agent_callable
         self._timeout_seconds = timeout_seconds
+        # Strands Agent does not support concurrent invocations.
+        self._call_lock = asyncio.Lock()
 
     async def generate_reply(self, request: AgentRequest) -> str:
         prompt = self._build_prompt(request)
-        response = await asyncio.wait_for(
-            asyncio.to_thread(self._agent_callable, prompt),
-            timeout=self._timeout_seconds,
-        )
+        async with self._call_lock:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(self._agent_callable, prompt),
+                timeout=self._timeout_seconds,
+            )
         return str(response).strip()
 
     @staticmethod
@@ -185,7 +188,10 @@ def _build_system_prompt(config: AppConfig) -> str:
         "Use tools proactively. "
         "If a request involves web content, links, latest information, or fact checking, "
         "call http_request and answer based on fetched results. "
-        "If tool access fails, state the failure briefly and suggest a retry."
+        "If tool access fails, state the failure briefly and suggest a retry. "
+        "When using shell, always run a single non-interactive command and never start an interactive shell. "
+        "For shell, always provide a concrete command string; do not call shell with empty input. "
+        "For file_read/file_write/editor, always use absolute paths."
     )
     agent_md = _load_agent_md(config.agent_md_path)
     if not agent_md:

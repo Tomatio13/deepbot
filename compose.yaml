@@ -10,6 +10,8 @@ services:
       MCP_CONFIG_PATH: /app/config/mcp.json
       MCP_HOST_GATEWAY: host.docker.internal
       WORKSPACE_DIR: /workspace
+      STRANDS_TOOL_CONSOLE_MODE: disable
+      BYPASS_TOOL_CONSENT: "true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

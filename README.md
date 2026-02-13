@@ -20,7 +20,7 @@ Discord bot built with Strands Agents. It replies to every user message automati
 - `/reset` command to clear session context
 - Model switching with `STRANDS_MODEL_PROVIDER` / `STRANDS_MODEL_CONFIG`
 - MCP server tool integration via `config/mcp.json` (container default: `/app/config/mcp.json`)
-- Loads Agent Skills from `config/skills` and runs them with `$skill_name`
+- Loads Agent Skills from `config/skills` and runs them with `$skill_name` or `/skill_name`
 - Standard tools: `file_read`, `file_write`, `editor`, `shell`, `http_request`, `environment`, `calculator`, `current_time`
 
 ## 🛠️ Setup
@@ -41,6 +41,8 @@ cp .env.example .env
 - Model can be set with `STRANDS_MODEL_CONFIG.model_id` or `OPENAI_MODEL_ID` (`STRANDS_MODEL_ID` / `MODEL_ID` are also accepted).
 - MCP config path can be changed with `MCP_CONFIG_PATH` (default: `/app/config/mcp.json`).
 - If a URL in `mcp.json` uses `localhost` / `127.0.0.1`, it is automatically converted to `MCP_HOST_GATEWAY` (default: `host.docker.internal`) in containers.
+- Agent memory write path defaults to `${WORKSPACE_DIR}/agent-memory/memory` (override with `AGENT_MEMORY_DIR`).
+- For non-interactive tool execution in containers, set `STRANDS_TOOL_CONSOLE_MODE=disable` and `BYPASS_TOOL_CONSENT=true`.
 
 4. Edit `config/AGENT.md` (auto-reflected as system prompt).
 5. Add `config/skills/<skill-name>/SKILL.md` if needed.
@@ -88,7 +90,7 @@ docker compose down
 ```
 
 Skill usage example:
-- Send `$reviewer Improve this README` in Discord to run the matching skill.
+- Send `$reviewer Improve this README` or `/reviewer Improve this README` in Discord to run the matching skill.
 
 ## 🧠 Session Behavior
 - DM: `dm:{user_id}`
@@ -108,5 +110,6 @@ pytest -q
 - Auto-reply to every message may hit rate limits.
 - The bot does not reply to its own messages.
 - It loads `config/AGENT.md` (falls back to default prompt if missing).
+- `BOT_PROCESSING_MESSAGE` controls the pre-reply text for research-like inputs (URL, `$skill`, questions, search/latest keywords). Set empty to disable.
 - In secure default mode, only `http_request`, `calculator`, and `current_time` are enabled.
 - Set `DANGEROUS_TOOLS_ENABLED=true` to enable `file_read`, `file_write`, `editor`, `environment`, and `shell` (trusted environments only).

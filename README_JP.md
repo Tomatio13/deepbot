@@ -20,7 +20,7 @@ Strands Agents を使った Discord Bot です。ユーザーの全発言に自�
 - `/reset` でセッションコンテキストをクリア
 - `STRANDS_MODEL_PROVIDER` / `STRANDS_MODEL_CONFIG` でモデル切り替え
 - `config/mcp.json` 経由の MCP サーバーツール連携（コンテナ既定: `/app/config/mcp.json`）
-- `config/skills` 配下の Agent Skills を読み込み、`$skill名` で実行
+- `config/skills` 配下の Agent Skills を読み込み、`$skill名` または `/skill名` で実行
 - 標準ツール: `file_read`, `file_write`, `editor`, `shell`, `http_request`, `environment`, `calculator`, `current_time`
 
 ## 🛠️ Setup
@@ -41,6 +41,8 @@ cp .env.example .env
 - モデルは `STRANDS_MODEL_CONFIG.model_id` または `OPENAI_MODEL_ID` で指定します（`STRANDS_MODEL_ID` / `MODEL_ID` も可）。
 - MCP 設定ファイルは `MCP_CONFIG_PATH` で変更できます（既定: `/app/config/mcp.json`）。
 - `mcp.json` の URL が `localhost` / `127.0.0.1` の場合、コンテナ内で `MCP_HOST_GATEWAY`（既定: `host.docker.internal`）へ自動変換されます。
+- agent-memory の保存先は既定で `${WORKSPACE_DIR}/agent-memory/memory` です（`AGENT_MEMORY_DIR` で上書き可能）。
+- コンテナ内でツールを非対話で実行するため、`STRANDS_TOOL_CONSOLE_MODE=disable` と `BYPASS_TOOL_CONSENT=true` の設定を推奨します。
 
 4. `config/AGENT.md` を編集します（system prompt に自動反映）。
 5. 必要に応じて `config/skills/<skill-name>/SKILL.md` を作成します。
@@ -88,7 +90,7 @@ docker compose down
 ```
 
 Skill 実行例:
-- Discord で `$reviewer このREADMEを改善して` のように送ると、対応 Skill を実行できます。
+- Discord で `$reviewer このREADMEを改善して` または `/reviewer このREADMEを改善して` のように送ると、対応 Skill を実行できます。
 
 ## 🧠 Session Behavior
 - DM: `dm:{user_id}`
@@ -108,5 +110,6 @@ pytest -q
 - 全発言自動返信はレート制限に注意が必要です。
 - Bot 自身のメッセージには返信しません。
 - `config/AGENT.md` を読み込みます（見つからない場合はデフォルト prompt のみ利用）。
+- 回答生成前の先行返信メッセージは `BOT_PROCESSING_MESSAGE` で設定できます（URL、`$skill`、疑問文、調査系キーワード入力時のみ送信。空文字で無効化）。
 - セキュアデフォルトでは `http_request`, `calculator`, `current_time` のみ有効です。
 - `DANGEROUS_TOOLS_ENABLED=true` で `file_read`, `file_write`, `editor`, `environment`, `shell` を有効化できます（信頼できる環境のみ）。

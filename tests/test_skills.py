@@ -52,3 +52,30 @@ def test_extract_selected_skill_by_prefix(monkeypatch, tmp_path: Path) -> None:
     assert "Selected Skill" in prompt
     assert "writer" in prompt
 
+
+def test_extract_selected_skill_by_slash_prefix(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    skills_dir = config_dir / "skills"
+    _write_skill(skills_dir, "agent-memory", "store and recall memory")
+
+    monkeypatch.setenv("DEEPBOT_CONFIG_DIR", str(config_dir))
+    skills = list_skills()
+
+    selected, cleaned = extract_selected_skill("/agent-memory 覚えておいて", skills)
+    assert selected is not None
+    assert selected.name == "agent-memory"
+    assert cleaned == "覚えておいて"
+
+
+def test_extract_selected_skill_with_mention_prefix(monkeypatch, tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    skills_dir = config_dir / "skills"
+    _write_skill(skills_dir, "agent-memory", "store and recall memory")
+
+    monkeypatch.setenv("DEEPBOT_CONFIG_DIR", str(config_dir))
+    skills = list_skills()
+
+    selected, cleaned = extract_selected_skill("<@12345> /agent-memory 検索して", skills)
+    assert selected is not None
+    assert selected.name == "agent-memory"
+    assert cleaned == "検索して"

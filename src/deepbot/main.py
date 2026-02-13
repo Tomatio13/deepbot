@@ -29,6 +29,7 @@ def main() -> None:
         store=session_store,
         runtime=runtime,
         fallback_message=config.bot_fallback_message,
+        processing_message=config.bot_processing_message,
     )
     client = DeepbotClientFactory.create(processor=processor)
 

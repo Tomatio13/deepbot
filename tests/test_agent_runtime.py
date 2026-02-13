@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 
 import pytest
 
@@ -30,3 +32,29 @@ async def test_agent_runtime_timeout() -> None:
 
     with pytest.raises(asyncio.TimeoutError):
         await runtime.generate_reply(AgentRequest(session_id="s1", context=[]))
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_serializes_concurrent_calls() -> None:
+    state_lock = threading.Lock()
+    in_flight = 0
+    max_in_flight = 0
+
+    def blocking_agent(_: str) -> str:
+        nonlocal in_flight, max_in_flight
+        with state_lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        time.sleep(0.05)
+        with state_lock:
+            in_flight -= 1
+        return "done"
+
+    runtime = AgentRuntime(agent_callable=blocking_agent, timeout_seconds=1)
+
+    await asyncio.gather(
+        runtime.generate_reply(AgentRequest(session_id="s1", context=[])),
+        runtime.generate_reply(AgentRequest(session_id="s1", context=[])),
+    )
+
+    assert max_in_flight == 1
