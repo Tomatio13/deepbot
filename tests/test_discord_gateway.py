@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import types
+
 import pytest
 
 from deepbot.gateway.discord_bot import MessageEnvelope, MessageProcessor
@@ -15,11 +17,28 @@ class DummyRuntime:
         return f"reply:{request.session_id}"
 
 
+class FailingRuntime:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate_reply(self, request):
+        self.calls += 1
+        raise RuntimeError("boom")
+
+
+PROCESSING = "お調べしますね。少しお待ちください。"
+
+
 @pytest.mark.asyncio
 async def test_ignores_bot_messages() -> None:
     store = SessionStore(max_messages=10, ttl_seconds=300)
     runtime = DummyRuntime()
-    processor = MessageProcessor(store=store, runtime=runtime, fallback_message="fallback")
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
     sent: list[str] = []
 
     message = MessageEnvelope(
@@ -45,12 +64,17 @@ async def test_ignores_bot_messages() -> None:
 async def test_auto_reply_and_context_saved() -> None:
     store = SessionStore(max_messages=10, ttl_seconds=300)
     runtime = DummyRuntime()
-    processor = MessageProcessor(store=store, runtime=runtime, fallback_message="fallback")
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
     sent: list[str] = []
 
     message = MessageEnvelope(
         message_id="1",
-        content="hello",
+        content="こんにちは",
         author_id="u1",
         author_is_bot=False,
         guild_id="g1",
@@ -70,10 +94,46 @@ async def test_auto_reply_and_context_saved() -> None:
 
 
 @pytest.mark.asyncio
+async def test_processing_message_sent_for_search_like_input() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = DummyRuntime()
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+    sent: list[str] = []
+
+    message = MessageEnvelope(
+        message_id="1",
+        content="最新ニュースを調べて",
+        author_id="u1",
+        author_is_bot=False,
+        guild_id="g1",
+        channel_id="c1",
+        thread_id=None,
+    )
+
+    async def send_reply(text: str):
+        sent.append(text)
+
+    await processor.handle_message(message, send_reply=send_reply)
+
+    assert runtime.calls == 1
+    assert sent == [PROCESSING, "reply:guild:g1:channel:c1"]
+
+
+@pytest.mark.asyncio
 async def test_reset_command_clears_context() -> None:
     store = SessionStore(max_messages=10, ttl_seconds=300)
     runtime = DummyRuntime()
-    processor = MessageProcessor(store=store, runtime=runtime, fallback_message="fallback")
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
 
     async def send_reply(_: str):
         return None
@@ -105,3 +165,43 @@ async def test_reset_command_clears_context() -> None:
     )
 
     assert await store.get_context("guild:g1:channel:c1") == []
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_command_falls_back_when_runtime_fails() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = FailingRuntime()
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+    sent: list[str] = []
+
+    async def fake_handle(_: str) -> str:
+        return "memory-ok"
+
+    processor._handle_agent_memory = types.MethodType(  # type: ignore[method-assign]
+        lambda self, query: fake_handle(query),
+        processor,
+    )
+
+    async def send_reply(text: str):
+        sent.append(text)
+
+    await processor.handle_message(
+        MessageEnvelope(
+            message_id="1",
+            content="/agent-memory テスト記録",
+            author_id="u1",
+            author_is_bot=False,
+            guild_id="g1",
+            channel_id="c1",
+            thread_id=None,
+        ),
+        send_reply=send_reply,
+    )
+
+    assert runtime.calls == 1
+    assert sent == [PROCESSING, "memory-ok"]

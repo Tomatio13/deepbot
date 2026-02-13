@@ -28,6 +28,7 @@ class AppConfig:
     auto_reply_all: bool
     agent_timeout_seconds: int
     bot_fallback_message: str
+    bot_processing_message: str
     log_level: str
     dangerous_tools_enabled: bool
 
@@ -121,6 +122,10 @@ def load_config() -> AppConfig:
         bot_fallback_message=os.environ.get(
             "BOT_FALLBACK_MESSAGE",
             "今ちょっと調子が悪いです。少し待ってからもう一度お願いします。",
+        ),
+        bot_processing_message=os.environ.get(
+            "BOT_PROCESSING_MESSAGE",
+            "お調べしますね。少しお待ちください。",
         ),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         dangerous_tools_enabled=_parse_bool(

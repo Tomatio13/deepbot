@@ -5,7 +5,10 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-SKILL_PREFIX_RE = re.compile(r"^\$(?P<name>[a-zA-Z0-9_-]+)(?:\s+(?P<rest>.*))?$", re.DOTALL)
+SKILL_PREFIX_RE = re.compile(
+    r"^(?:<@!?\d+>\s*)*(?:[$/])(?P<name>[a-zA-Z0-9_-]+)(?:\s+(?P<rest>.*))?$",
+    re.DOTALL,
+)
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 
@@ -106,4 +109,3 @@ def _parse_frontmatter(content: str) -> tuple[str, str] | None:
     if not name or not description:
         return None
     return name, description
-
