@@ -1,0 +1,21 @@
+services:
+  deepbot:
+    image: python:3.12-slim
+    container_name: deepbot
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      DEEPBOT_CONFIG_DIR: /app/config
+      MCP_CONFIG_PATH: /app/config/mcp.json
+      MCP_HOST_GATEWAY: host.docker.internal
+      WORKSPACE_DIR: /workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./:/app
+      - ./config:/app/config:ro
+      - ./workspace:/workspace
+    command: >
+      sh -c "pip install --no-cache-dir -e . && deepbot"
+    restart: unless-stopped

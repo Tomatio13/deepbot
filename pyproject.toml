@@ -1,0 +1,36 @@
+[project]
+name = "deepbot"
+version = "0.1.0"
+description = "Discord bot gateway for Strands Agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "discord.py>=2.4.0",
+  "openai>=1.58.1",
+  "python-dotenv>=1.0.1",
+  "strands-agents>=1.17.0",
+  "strands-agents-tools>=0.2.16",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.4",
+  "pytest-asyncio>=0.24.0",
+]
+
+[project.scripts]
+deepbot = "deepbot.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
