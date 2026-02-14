@@ -111,5 +111,6 @@ pytest -q
 - The bot does not reply to its own messages.
 - It loads `config/AGENT.md` (falls back to default prompt if missing).
 - `BOT_PROCESSING_MESSAGE` controls the pre-reply text for research-like inputs (URL, `$skill`, questions, search/latest keywords). Set empty to disable.
+- Set `AUTH_PASSPHRASE` to require `/auth <passphrase>` after idle timeout (`AUTH_IDLE_TIMEOUT_MINUTES`), with temporary access window (`AUTH_WINDOW_MINUTES`) and lockout (`AUTH_MAX_RETRIES`, `AUTH_LOCK_MINUTES`).
 - In secure default mode, only `http_request`, `calculator`, and `current_time` are enabled.
 - Set `DANGEROUS_TOOLS_ENABLED=true` to enable `file_read`, `file_write`, `editor`, `environment`, and `shell` (trusted environments only).

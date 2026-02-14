@@ -111,5 +111,6 @@ pytest -q
 - Bot 自身のメッセージには返信しません。
 - `config/AGENT.md` を読み込みます（見つからない場合はデフォルト prompt のみ利用）。
 - 回答生成前の先行返信メッセージは `BOT_PROCESSING_MESSAGE` で設定できます（URL、`$skill`、疑問文、調査系キーワード入力時のみ送信。空文字で無効化）。
+- `AUTH_PASSPHRASE` を設定すると、無通信時間 (`AUTH_IDLE_TIMEOUT_MINUTES`) 経過後は `/auth <合言葉>` が必須になります（有効期間: `AUTH_WINDOW_MINUTES`、失敗制限: `AUTH_MAX_RETRIES`、ロック時間: `AUTH_LOCK_MINUTES`）。
 - セキュアデフォルトでは `http_request`, `calculator`, `current_time` のみ有効です。
 - `DANGEROUS_TOOLS_ENABLED=true` で `file_read`, `file_write`, `editor`, `environment`, `shell` を有効化できます（信頼できる環境のみ）。

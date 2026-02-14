@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
@@ -29,13 +31,35 @@ class MessageEnvelope:
     thread_id: str | None
 
 
+@dataclass(frozen=True)
+class AuthConfig:
+    passphrase: str
+    idle_timeout_seconds: int
+    auth_window_seconds: int
+    max_retries: int
+    lock_seconds: int
+    auth_command: str = "/auth"
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.passphrase)
+
+
+@dataclass
+class _AuthSessionState:
+    last_activity_at: float | None = None
+    authenticated_until: float | None = None
+    failed_attempts: int = 0
+    locked_until: float | None = None
+
+
 class MessageProcessor:
     _AGENT_MEMORY_PREFIX_RE = re.compile(
         r"^(?:<@!?\d+>\s*)*(?:[$/])agent-memory(?:\s+(?P<rest>.*))?$",
         re.DOTALL | re.IGNORECASE,
     )
     _PROCESSING_HINT_PATTERN = re.compile(
-        r"(https?://|[$][\w-]+|[?？]|調べ|検索|最新|ソース|source|link|url|web|mcp)",
+        r"(https?://|[$/][\w-]+|[?？]|調べ|検索|最新|ソース|source|link|url|web|mcp)",
         re.IGNORECASE,
     )
     _MEMORY_SEARCH_HINT_RE = re.compile(
@@ -50,11 +74,23 @@ class MessageProcessor:
         runtime: AgentRuntime,
         fallback_message: str,
         processing_message: str,
+        auth_config: AuthConfig | None = None,
+        time_fn: Callable[[], float] | None = None,
     ) -> None:
         self._store = store
         self._runtime = runtime
         self._fallback_message = fallback_message
         self._processing_message = processing_message.strip()
+        self._auth_config = auth_config or AuthConfig(
+            passphrase="",
+            idle_timeout_seconds=0,
+            auth_window_seconds=0,
+            max_retries=0,
+            lock_seconds=0,
+        )
+        self._time_fn = time_fn or time.time
+        self._auth_states: dict[str, _AuthSessionState] = {}
+        self._auth_lock = asyncio.Lock()
 
     @classmethod
     def _should_send_processing_message(cls, content: str) -> bool:
@@ -78,6 +114,114 @@ class MessageProcessor:
     def _agent_memory_scripts_dir() -> Path:
         config_dir = os.environ.get("DEEPBOT_CONFIG_DIR", "/app/config").strip() or "/app/config"
         return Path(config_dir).expanduser() / "skills" / "agent-memory" / "scripts"
+
+    def _extract_auth_attempt(self, content: str) -> str | None:
+        command = self._auth_config.auth_command
+        if not command:
+            return None
+        if content == command:
+            return ""
+        prefix = f"{command} "
+        if content.startswith(prefix):
+            return content[len(prefix):].strip()
+        return None
+
+    @staticmethod
+    def _seconds_to_minutes_text(seconds: float) -> str:
+        minutes = max(1, int((seconds + 59) // 60))
+        return f"{minutes}分"
+
+    async def _auth_response_for_attempt(self, session_id: str, attempt: str, now: float) -> str:
+        config = self._auth_config
+        if not config.enabled:
+            return ""
+        async with self._auth_lock:
+            state = self._auth_states.setdefault(session_id, _AuthSessionState())
+            self._refresh_auth_state_locked(state, now)
+
+            if state.locked_until is not None and now < state.locked_until:
+                remaining = state.locked_until - now
+                return (
+                    "認証の失敗回数が上限に達しました。"
+                    f"{self._seconds_to_minutes_text(remaining)}後に再試行してください。"
+                )
+
+            # compare_digest on str supports ASCII only on some Python versions.
+            if hmac.compare_digest(attempt.encode("utf-8"), config.passphrase.encode("utf-8")):
+                state.failed_attempts = 0
+                state.locked_until = None
+                state.authenticated_until = now + config.auth_window_seconds
+                state.last_activity_at = now
+                return (
+                    "認証に成功しました。"
+                    f"{self._seconds_to_minutes_text(config.auth_window_seconds)}の間、会話を継続できます。"
+                )
+
+            state.failed_attempts += 1
+            state.last_activity_at = now
+            remaining_attempts = config.max_retries - state.failed_attempts
+            if remaining_attempts <= 0:
+                state.failed_attempts = 0
+                state.authenticated_until = None
+                state.locked_until = now + config.lock_seconds
+                return (
+                    "認証に失敗しました。"
+                    f"{self._seconds_to_minutes_text(config.lock_seconds)}ロックします。"
+                )
+            return f"認証に失敗しました。残り{remaining_attempts}回です。"
+
+    async def _clear_auth_state(self, session_id: str) -> None:
+        async with self._auth_lock:
+            self._auth_states.pop(session_id, None)
+
+    def _refresh_auth_state_locked(self, state: _AuthSessionState, now: float) -> None:
+        config = self._auth_config
+        if state.locked_until is not None and now >= state.locked_until:
+            state.locked_until = None
+            state.failed_attempts = 0
+
+        if state.authenticated_until is not None and now >= state.authenticated_until:
+            state.authenticated_until = None
+
+        if (
+            state.last_activity_at is not None
+            and config.idle_timeout_seconds > 0
+            and (now - state.last_activity_at) > config.idle_timeout_seconds
+        ):
+            state.authenticated_until = None
+
+    async def _is_authenticated(self, session_id: str, now: float) -> bool:
+        config = self._auth_config
+        if not config.enabled:
+            return True
+        async with self._auth_lock:
+            state = self._auth_states.setdefault(session_id, _AuthSessionState())
+            self._refresh_auth_state_locked(state, now)
+            if state.locked_until is not None and now < state.locked_until:
+                return False
+            authenticated = state.authenticated_until is not None and now < state.authenticated_until
+            return authenticated
+
+    async def _mark_activity(self, session_id: str, now: float) -> None:
+        if not self._auth_config.enabled:
+            return
+        async with self._auth_lock:
+            state = self._auth_states.setdefault(session_id, _AuthSessionState())
+            self._refresh_auth_state_locked(state, now)
+            state.last_activity_at = now
+
+    async def _build_auth_prompt(self, session_id: str, now: float) -> str:
+        command = self._auth_config.auth_command
+        async with self._auth_lock:
+            state = self._auth_states.setdefault(session_id, _AuthSessionState())
+            self._refresh_auth_state_locked(state, now)
+            if state.locked_until is not None and now < state.locked_until:
+                remaining = state.locked_until - now
+                return (
+                    "このセッションは一時ロック中です。"
+                    f"{self._seconds_to_minutes_text(remaining)}後に再試行してください。"
+                )
+        return f"続行するには `{command} <合言葉>` を入力してください。"
 
     async def _run_agent_memory_script(self, *args: str) -> tuple[int, str, str]:
         scripts_dir = self._agent_memory_scripts_dir()
@@ -156,10 +300,25 @@ class MessageProcessor:
             return
 
         session_id = self.build_session_id(message)
+        now = self._time_fn()
 
         if content == "/reset":
             await self._store.clear(session_id)
+            await self._clear_auth_state(session_id)
             await send_reply("このチャンネルの会話コンテキストをリセットしました。")
+            return
+
+        auth_attempt = self._extract_auth_attempt(content)
+        if auth_attempt is not None:
+            auth_response = await self._auth_response_for_attempt(session_id, auth_attempt, now)
+            if auth_response.startswith("認証に成功しました。"):
+                await self._store.clear(session_id)
+            await send_reply(auth_response)
+            return
+
+        if not await self._is_authenticated(session_id, now):
+            await self._mark_activity(session_id, now)
+            await send_reply(await self._build_auth_prompt(session_id, now))
             return
 
         agent_memory_query = self._extract_agent_memory_query(content)
@@ -190,8 +349,10 @@ class MessageProcessor:
                     content=reply,
                     author_id="deepbot",
                 )
+                await self._mark_activity(session_id, self._time_fn())
                 await send_reply(reply)
                 return
+            await self._mark_activity(session_id, self._time_fn())
             await send_reply(self._fallback_message)
             return
 
@@ -201,6 +362,7 @@ class MessageProcessor:
             content=reply,
             author_id="deepbot",
         )
+        await self._mark_activity(session_id, self._time_fn())
         await send_reply(reply)
 
 

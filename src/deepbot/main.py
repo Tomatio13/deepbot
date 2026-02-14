@@ -4,7 +4,7 @@ import logging
 
 from deepbot.agent.runtime import create_runtime
 from deepbot.config import ConfigError, load_config, to_runtime_settings
-from deepbot.gateway.discord_bot import DeepbotClientFactory, MessageProcessor
+from deepbot.gateway.discord_bot import AuthConfig, DeepbotClientFactory, MessageProcessor
 from deepbot.logging import setup_logging
 from deepbot.memory.session_store import SessionStore
 
@@ -30,6 +30,14 @@ def main() -> None:
         runtime=runtime,
         fallback_message=config.bot_fallback_message,
         processing_message=config.bot_processing_message,
+        auth_config=AuthConfig(
+            passphrase=config.auth_passphrase,
+            idle_timeout_seconds=config.auth_idle_timeout_minutes * 60,
+            auth_window_seconds=config.auth_window_minutes * 60,
+            max_retries=config.auth_max_retries,
+            lock_seconds=config.auth_lock_minutes * 60,
+            auth_command=config.auth_command,
+        ),
     )
     client = DeepbotClientFactory.create(processor=processor)
 
