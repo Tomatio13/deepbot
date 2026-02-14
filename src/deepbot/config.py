@@ -31,6 +31,12 @@ class AppConfig:
     bot_processing_message: str
     log_level: str
     dangerous_tools_enabled: bool
+    auth_passphrase: str
+    auth_idle_timeout_minutes: int
+    auth_window_minutes: int
+    auth_max_retries: int
+    auth_lock_minutes: int
+    auth_command: str
 
 
 @dataclass(frozen=True)
@@ -109,6 +115,24 @@ def load_config() -> AppConfig:
             "Set STRANDS_MODEL_CONFIG.model_id or OPENAI_MODEL_ID/STRANDS_MODEL_ID."
         )
 
+    auth_passphrase = os.environ.get("AUTH_PASSPHRASE", "").strip()
+    auth_idle_timeout_minutes = int(os.environ.get("AUTH_IDLE_TIMEOUT_MINUTES", "15"))
+    auth_window_minutes = int(os.environ.get("AUTH_WINDOW_MINUTES", "10"))
+    auth_max_retries = int(os.environ.get("AUTH_MAX_RETRIES", "3"))
+    auth_lock_minutes = int(os.environ.get("AUTH_LOCK_MINUTES", "30"))
+    auth_command = os.environ.get("AUTH_COMMAND", "/auth").strip() or "/auth"
+
+    if auth_idle_timeout_minutes <= 0:
+        raise ConfigError("AUTH_IDLE_TIMEOUT_MINUTES must be > 0")
+    if auth_window_minutes <= 0:
+        raise ConfigError("AUTH_WINDOW_MINUTES must be > 0")
+    if auth_max_retries <= 0:
+        raise ConfigError("AUTH_MAX_RETRIES must be > 0")
+    if auth_lock_minutes <= 0:
+        raise ConfigError("AUTH_LOCK_MINUTES must be > 0")
+    if not auth_command.startswith("/"):
+        raise ConfigError("AUTH_COMMAND must start with '/'")
+
     return AppConfig(
         discord_bot_token=token,
         strands_model_provider=provider,
@@ -132,6 +156,12 @@ def load_config() -> AppConfig:
             os.environ.get("DANGEROUS_TOOLS_ENABLED"),
             default=False,
         ),
+        auth_passphrase=auth_passphrase,
+        auth_idle_timeout_minutes=auth_idle_timeout_minutes,
+        auth_window_minutes=auth_window_minutes,
+        auth_max_retries=auth_max_retries,
+        auth_lock_minutes=auth_lock_minutes,
+        auth_command=auth_command,
     )
 
 
