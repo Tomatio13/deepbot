@@ -21,6 +21,7 @@ Strands Agents を使った Discord Bot です。ユーザーの全発言に自�
 - `STRANDS_MODEL_PROVIDER` / `STRANDS_MODEL_CONFIG` でモデル切り替え
 - `config/mcp.json` 経由の MCP サーバーツール連携（コンテナ既定: `/app/config/mcp.json`）
 - `config/skills` 配下の Agent Skills を読み込み、`$skill名` または `/skill名` で実行
+- 添付ファイルのメタ情報を会話コンテキストに含め、対応画像（`png/jpeg/gif/webp`）はモデル入力へ渡す
 - 標準ツール: `file_read`, `file_write`, `editor`, `shell`, `http_request`, `environment`, `calculator`, `current_time`
 
 ## 🛠️ Setup

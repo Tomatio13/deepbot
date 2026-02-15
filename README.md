@@ -21,6 +21,7 @@ Discord bot built with Strands Agents. It replies to every user message automati
 - Model switching with `STRANDS_MODEL_PROVIDER` / `STRANDS_MODEL_CONFIG`
 - MCP server tool integration via `config/mcp.json` (container default: `/app/config/mcp.json`)
 - Loads Agent Skills from `config/skills` and runs them with `$skill_name` or `/skill_name`
+- Includes Discord attachment metadata in context and forwards supported image attachments (`png/jpeg/gif/webp`) to the model
 - Standard tools: `file_read`, `file_write`, `editor`, `shell`, `http_request`, `environment`, `calculator`, `current_time`
 
 ## 🛠️ Setup

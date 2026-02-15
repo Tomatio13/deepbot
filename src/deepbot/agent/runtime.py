@@ -22,6 +22,13 @@ logger = logging.getLogger(__name__)
 class AgentRequest:
     session_id: str
     context: list[dict[str, str]]
+    image_attachments: tuple["ImageAttachment", ...] = ()
+
+
+@dataclass(frozen=True)
+class ImageAttachment:
+    format: str
+    data: bytes
 
 
 class AgentRuntime:
@@ -32,13 +39,56 @@ class AgentRuntime:
         self._call_lock = asyncio.Lock()
 
     async def generate_reply(self, request: AgentRequest) -> str:
-        prompt = self._build_prompt(request)
+        model_input = self._build_model_input(request)
+        fallback_prompt = self._build_prompt(request)
         async with self._call_lock:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(self._agent_callable, prompt),
-                timeout=self._timeout_seconds,
-            )
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(self._agent_callable, model_input),
+                    timeout=self._timeout_seconds,
+                )
+            except Exception as exc:
+                if request.image_attachments and self._should_retry_without_images(exc):
+                    logger.warning(
+                        "Image input rejected by model provider. Retrying without images. session_id=%s",
+                        request.session_id,
+                    )
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(self._agent_callable, fallback_prompt),
+                        timeout=self._timeout_seconds,
+                    )
+                else:
+                    raise
         return str(response).strip()
+
+    @staticmethod
+    def _should_retry_without_images(exc: Exception) -> bool:
+        text = str(exc).lower()
+        if "invalid api parameter" in text:
+            return True
+        if "unsupported" in text and "image" in text:
+            return True
+        if "invalid" in text and "image" in text:
+            return True
+        return False
+
+    @classmethod
+    def _build_model_input(cls, request: AgentRequest) -> str | list[dict[str, Any]]:
+        prompt = cls._build_prompt(request)
+        if not request.image_attachments:
+            return prompt
+
+        content_blocks: list[dict[str, Any]] = [{"text": prompt}]
+        for attachment in request.image_attachments:
+            content_blocks.append(
+                {
+                    "image": {
+                        "format": attachment.format,
+                        "source": {"bytes": attachment.data},
+                    }
+                }
+            )
+        return [{"role": "user", "content": content_blocks}]
 
     @staticmethod
     def _build_prompt(request: AgentRequest) -> str:
@@ -71,10 +121,41 @@ class AgentRuntime:
         )
         for message in context:
             role = message.get("role", "user")
-            content = message.get("content", "")
+            content = str(message.get("content", "")).strip()
+            if not content:
+                logger.warning(
+                    "Skipped empty context message while building prompt. session_id=%s role=%s",
+                    request.session_id,
+                    role,
+                )
+                continue
             lines.append(f"[{role}] {content}")
         lines.append("Reply in Japanese, concise and helpful.")
         return "\n".join(lines)
+
+
+def _patch_openai_image_content_formatter(model_cls: type[Any]) -> None:
+    if getattr(model_cls, "_deepbot_image_url_patch_applied", False):
+        return
+
+    original_attr = model_cls.__dict__.get("format_request_message_content")
+    original_func: Callable[..., Any]
+    if isinstance(original_attr, classmethod):
+        original_func = original_attr.__func__
+    else:
+        original_func = getattr(model_cls, "format_request_message_content")
+
+    def patched(cls: type[Any], content: Any, **kwargs: Any) -> dict[str, Any]:
+        formatted = original_func(cls, content, **kwargs)
+        if isinstance(formatted, dict) and formatted.get("type") == "image_url":
+            image_url = formatted.get("image_url")
+            if isinstance(image_url, dict):
+                image_url.pop("format", None)
+                image_url.pop("detail", None)
+        return formatted
+
+    setattr(model_cls, "format_request_message_content", classmethod(patched))
+    setattr(model_cls, "_deepbot_image_url_patch_applied", True)
 
 
 def _load_model(config: AppConfig) -> Any | None:
@@ -106,15 +187,17 @@ def _load_model(config: AppConfig) -> Any | None:
             f"Install required dependency for {module_name}: {exc}"
         ) from exc
 
-    if provider == "openai" and config.openai_base_url:
-        client_args = model_config.get("client_args")
-        if client_args is None:
-            model_config["client_args"] = {"base_url": config.openai_base_url}
-        elif isinstance(client_args, dict):
-            model_config["client_args"] = dict(client_args)
-            model_config["client_args"].setdefault("base_url", config.openai_base_url)
-        else:
-            raise ConfigError("STRANDS_MODEL_CONFIG.client_args must be an object")
+    if provider == "openai":
+        _patch_openai_image_content_formatter(model_cls)
+        if config.openai_base_url:
+            client_args = model_config.get("client_args")
+            if client_args is None:
+                model_config["client_args"] = {"base_url": config.openai_base_url}
+            elif isinstance(client_args, dict):
+                model_config["client_args"] = dict(client_args)
+                model_config["client_args"].setdefault("base_url", config.openai_base_url)
+            else:
+                raise ConfigError("STRANDS_MODEL_CONFIG.client_args must be an object")
 
     try:
         return model_cls(**model_config)

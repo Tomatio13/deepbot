@@ -36,11 +36,17 @@ class SessionStore:
         self._lock = asyncio.Lock()
 
     async def append(self, session_id: str, *, role: str, content: str, author_id: str) -> None:
+        normalized = content.strip()
+        if not normalized:
+            return
+
         now = self._time_fn()
         async with self._lock:
             self._evict_expired_locked(now)
             queue = self._sessions.setdefault(session_id, deque())
-            queue.append(SessionMessage(role=role, content=content, author_id=author_id, timestamp=now))
+            queue.append(
+                SessionMessage(role=role, content=normalized, author_id=author_id, timestamp=now)
+            )
             while len(queue) > self._max_messages:
                 queue.popleft()
             self._last_updated[session_id] = now

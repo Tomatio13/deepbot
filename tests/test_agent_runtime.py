@@ -6,7 +6,12 @@ import time
 
 import pytest
 
-from deepbot.agent.runtime import AgentRequest, AgentRuntime
+from deepbot.agent.runtime import (
+    AgentRequest,
+    AgentRuntime,
+    ImageAttachment,
+    _patch_openai_image_content_formatter,
+)
 
 
 @pytest.mark.asyncio
@@ -58,3 +63,55 @@ async def test_agent_runtime_serializes_concurrent_calls() -> None:
     )
 
     assert max_in_flight == 1
+
+
+def test_build_prompt_skips_empty_context_messages() -> None:
+    prompt = AgentRuntime._build_prompt(
+        AgentRequest(
+            session_id="s1",
+            context=[
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "   "},
+            ],
+        )
+    )
+
+    assert "[user] hello" in prompt
+    assert "[assistant]" not in prompt
+
+
+def test_build_model_input_includes_image_blocks_when_attachments_present() -> None:
+    model_input = AgentRuntime._build_model_input(
+        AgentRequest(
+            session_id="s1",
+            context=[{"role": "user", "content": "cat image"}],
+            image_attachments=(ImageAttachment(format="png", data=b"PNGDATA"),),
+        )
+    )
+
+    assert isinstance(model_input, list)
+    assert model_input[0]["role"] == "user"
+    image_blocks = [b for b in model_input[0]["content"] if "image" in b]
+    assert len(image_blocks) == 1
+    assert image_blocks[0]["image"]["format"] == "png"
+
+
+def test_openai_image_formatter_patch_removes_detail_and_format() -> None:
+    class DummyOpenAIModel:
+        @classmethod
+        def format_request_message_content(cls, content, **kwargs):
+            return {
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:image/jpeg;base64,AAA",
+                    "detail": "auto",
+                    "format": "image/jpeg",
+                },
+            }
+
+    _patch_openai_image_content_formatter(DummyOpenAIModel)
+    formatted = DummyOpenAIModel.format_request_message_content({"image": {}})
+    assert formatted["type"] == "image_url"
+    assert formatted["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert "detail" not in formatted["image_url"]
+    assert "format" not in formatted["image_url"]
