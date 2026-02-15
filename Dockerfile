@@ -7,6 +7,8 @@ WORKDIR /app
 
 COPY . /app
 
+RUN chmod +x /app/scripts/docker-entrypoint.sh
 RUN pip install --no-cache-dir .
 
+ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
 CMD ["deepbot"]

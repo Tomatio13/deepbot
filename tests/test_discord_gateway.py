@@ -1,19 +1,29 @@
 from __future__ import annotations
 
 import types
+from types import SimpleNamespace
 
 import pytest
 
-from deepbot.gateway.discord_bot import AuthConfig, MessageEnvelope, MessageProcessor
+from deepbot.agent.runtime import ImageAttachment
+from deepbot.gateway.discord_bot import (
+    AttachmentEnvelope,
+    AuthConfig,
+    MessageEnvelope,
+    MessageProcessor,
+    _to_envelope,
+)
 from deepbot.memory.session_store import SessionStore
 
 
 class DummyRuntime:
     def __init__(self) -> None:
         self.calls = 0
+        self.last_request = None
 
     async def generate_reply(self, request):
         self.calls += 1
+        self.last_request = request
         return f"reply:{request.session_id}"
 
 
@@ -24,6 +34,15 @@ class FailingRuntime:
     async def generate_reply(self, request):
         self.calls += 1
         raise RuntimeError("boom")
+
+
+class EmptyReplyRuntime:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate_reply(self, request):
+        self.calls += 1
+        return "   "
 
 
 PROCESSING = "お調べしますね。少しお待ちください。"
@@ -57,6 +76,7 @@ async def test_ignores_bot_messages() -> None:
         guild_id="g1",
         channel_id="c1",
         thread_id=None,
+        attachments=(),
     )
 
     async def send_reply(text: str):
@@ -88,6 +108,7 @@ async def test_auto_reply_and_context_saved() -> None:
         guild_id="g1",
         channel_id="c1",
         thread_id=None,
+        attachments=(),
     )
 
     async def send_reply(text: str):
@@ -121,6 +142,7 @@ async def test_processing_message_sent_for_search_like_input() -> None:
         guild_id="g1",
         channel_id="c1",
         thread_id=None,
+        attachments=(),
     )
 
     async def send_reply(text: str):
@@ -155,6 +177,7 @@ async def test_reset_command_clears_context() -> None:
             guild_id="g1",
             channel_id="c1",
             thread_id=None,
+            attachments=(),
         ),
         send_reply=send_reply,
     )
@@ -168,6 +191,7 @@ async def test_reset_command_clears_context() -> None:
             guild_id="g1",
             channel_id="c1",
             thread_id=None,
+            attachments=(),
         ),
         send_reply=send_reply,
     )
@@ -207,12 +231,48 @@ async def test_agent_memory_command_falls_back_when_runtime_fails() -> None:
             guild_id="g1",
             channel_id="c1",
             thread_id=None,
+            attachments=(),
         ),
         send_reply=send_reply,
     )
 
     assert runtime.calls == 1
     assert sent == [PROCESSING, "memory-ok"]
+
+
+@pytest.mark.asyncio
+async def test_uses_fallback_when_runtime_returns_empty_reply() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = EmptyReplyRuntime()
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+    sent: list[str] = []
+
+    async def send_reply(text: str):
+        sent.append(text)
+
+    await processor.handle_message(
+        MessageEnvelope(
+            message_id="1",
+            content="こんにちは",
+            author_id="u1",
+            author_is_bot=False,
+            guild_id="g1",
+            channel_id="c1",
+            thread_id=None,
+            attachments=(),
+        ),
+        send_reply=send_reply,
+    )
+
+    assert runtime.calls == 1
+    assert sent == ["fallback"]
+    ctx = await store.get_context("guild:g1:channel:c1")
+    assert [m["content"] for m in ctx] == ["こんにちは", "fallback"]
 
 
 @pytest.mark.asyncio
@@ -247,6 +307,7 @@ async def test_auth_gate_requires_reauth_after_idle_timeout() -> None:
         guild_id="g1",
         channel_id="c1",
         thread_id=None,
+        attachments=(),
     )
 
     await processor.handle_message(session_message("1", "こんにちは"), send_reply=send_reply)
@@ -299,6 +360,7 @@ async def test_auth_gate_locks_after_max_failures() -> None:
         guild_id="g1",
         channel_id="c1",
         thread_id=None,
+        attachments=(),
     )
 
     await processor.handle_message(session_message("1", "/auth bad1"), send_reply=send_reply)
@@ -342,8 +404,88 @@ async def test_auth_gate_accepts_non_ascii_passphrase() -> None:
             guild_id="g1",
             channel_id="c1",
             thread_id=None,
+            attachments=(),
         ),
         send_reply=send_reply,
     )
 
     assert "認証に成功しました" in sent[-1]
+
+
+@pytest.mark.asyncio
+async def test_attachment_only_message_is_forwarded_to_runtime() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = DummyRuntime()
+
+    async def fake_image_loader(_: tuple[AttachmentEnvelope, ...]):
+        return [ImageAttachment(format="png", data=b"img")]
+
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+        image_loader=fake_image_loader,
+    )
+    sent: list[str] = []
+
+    async def send_reply(text: str):
+        sent.append(text)
+
+    await processor.handle_message(
+        MessageEnvelope(
+            message_id="1",
+            content="",
+            author_id="u1",
+            author_is_bot=False,
+            guild_id="g1",
+            channel_id="c1",
+            thread_id=None,
+            attachments=(
+                AttachmentEnvelope(
+                    filename="cat.png",
+                    url="https://cdn.example/cat.png",
+                    content_type="image/png",
+                    size=1234,
+                ),
+            ),
+        ),
+        send_reply=send_reply,
+    )
+
+    assert runtime.calls == 1
+    assert sent == [PROCESSING, "reply:guild:g1:channel:c1"]
+    assert runtime.last_request is not None
+    assert "https://cdn.example/cat.png" in runtime.last_request.context[-1]["content"]
+    assert len(runtime.last_request.image_attachments) == 1
+    assert runtime.last_request.image_attachments[0].format == "png"
+
+
+@pytest.mark.asyncio
+async def test_to_envelope_includes_attachment_metadata() -> None:
+    class DummyAttachment:
+        def __init__(self) -> None:
+            self.filename = "dog.jpg"
+            self.url = "https://cdn.example/dog.jpg"
+            self.content_type = "image/jpeg"
+            self.size = 2048
+
+        async def read(self, *, use_cached: bool = False):
+            assert use_cached is True
+            return b"img-bytes"
+
+    message = SimpleNamespace(
+        id=1,
+        content="見て",
+        author=SimpleNamespace(id=10, bot=False),
+        guild=SimpleNamespace(id=20),
+        channel=SimpleNamespace(id=30),
+        thread=None,
+        attachments=[DummyAttachment()],
+    )
+
+    envelope = await _to_envelope(message)
+    assert len(envelope.attachments) == 1
+    assert envelope.attachments[0].filename == "dog.jpg"
+    assert envelope.attachments[0].url == "https://cdn.example/dog.jpg"
+    assert envelope.attachments[0].data == b"img-bytes"

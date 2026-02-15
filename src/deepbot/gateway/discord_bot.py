@@ -6,11 +6,12 @@ import logging
 import os
 import re
 import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
-from deepbot.agent.runtime import AgentRequest, AgentRuntime
+from deepbot.agent.runtime import AgentRequest, AgentRuntime, ImageAttachment
 from deepbot.memory.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,16 @@ class MessageEnvelope:
     guild_id: str | None
     channel_id: str
     thread_id: str | None
+    attachments: tuple["AttachmentEnvelope", ...] = ()
+
+
+@dataclass(frozen=True)
+class AttachmentEnvelope:
+    filename: str
+    url: str
+    content_type: str | None
+    size: int | None
+    data: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +65,9 @@ class _AuthSessionState:
 
 
 class MessageProcessor:
+    _SUPPORTED_IMAGE_FORMATS = {"png", "jpeg", "gif", "webp"}
+    _MAX_IMAGE_ATTACHMENTS = 3
+    _MAX_IMAGE_BYTES = 5 * 1024 * 1024
     _AGENT_MEMORY_PREFIX_RE = re.compile(
         r"^(?:<@!?\d+>\s*)*(?:[$/])agent-memory(?:\s+(?P<rest>.*))?$",
         re.DOTALL | re.IGNORECASE,
@@ -76,6 +90,7 @@ class MessageProcessor:
         processing_message: str,
         auth_config: AuthConfig | None = None,
         time_fn: Callable[[], float] | None = None,
+        image_loader: Callable[[tuple[AttachmentEnvelope, ...]], Awaitable[list[ImageAttachment]]] | None = None,
     ) -> None:
         self._store = store
         self._runtime = runtime
@@ -89,6 +104,7 @@ class MessageProcessor:
             lock_seconds=0,
         )
         self._time_fn = time_fn or time.time
+        self._image_loader = image_loader or self._load_image_attachments
         self._auth_states: dict[str, _AuthSessionState] = {}
         self._auth_lock = asyncio.Lock()
 
@@ -115,6 +131,10 @@ class MessageProcessor:
         config_dir = os.environ.get("DEEPBOT_CONFIG_DIR", "/app/config").strip() or "/app/config"
         return Path(config_dir).expanduser() / "skills" / "agent-memory" / "scripts"
 
+    @staticmethod
+    def _normalize_reply(content: str) -> str:
+        return content.strip()
+
     def _extract_auth_attempt(self, content: str) -> str | None:
         command = self._auth_config.auth_command
         if not command:
@@ -125,6 +145,29 @@ class MessageProcessor:
         if content.startswith(prefix):
             return content[len(prefix):].strip()
         return None
+
+    @staticmethod
+    def _format_user_content_with_attachments(
+        content: str,
+        attachments: tuple[AttachmentEnvelope, ...],
+    ) -> str:
+        if not attachments:
+            return content
+
+        lines: list[str] = []
+        if content:
+            lines.append(content)
+            lines.append("")
+        lines.append("[Attachments]")
+        for attachment in attachments:
+            details: list[str] = []
+            if attachment.content_type:
+                details.append(attachment.content_type)
+            if attachment.size is not None:
+                details.append(f"{attachment.size} bytes")
+            detail_text = f" ({', '.join(details)})" if details else ""
+            lines.append(f"- {attachment.filename}{detail_text}: {attachment.url}")
+        return "\n".join(lines)
 
     @staticmethod
     def _seconds_to_minutes_text(seconds: float) -> str:
@@ -242,6 +285,53 @@ class MessageProcessor:
         stderr = stderr_raw.decode("utf-8", errors="replace").strip()
         return int(proc.returncode or 0), stdout, stderr
 
+    @classmethod
+    def _detect_image_format(cls, attachment: AttachmentEnvelope) -> str | None:
+        if attachment.content_type:
+            ct = attachment.content_type.lower()
+            if ct.startswith("image/"):
+                fmt = ct.split("/", 1)[1].split(";", 1)[0].strip()
+                if fmt == "jpg":
+                    fmt = "jpeg"
+                if fmt in cls._SUPPORTED_IMAGE_FORMATS:
+                    return fmt
+        suffix = Path(attachment.filename).suffix.lower().lstrip(".")
+        if suffix == "jpg":
+            suffix = "jpeg"
+        if suffix in cls._SUPPORTED_IMAGE_FORMATS:
+            return suffix
+        return None
+
+    @classmethod
+    def _download_limited_bytes(cls, url: str) -> bytes:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            data = response.read(cls._MAX_IMAGE_BYTES + 1)
+        if len(data) > cls._MAX_IMAGE_BYTES:
+            raise ValueError("attachment too large")
+        return data
+
+    async def _load_image_attachments(self, attachments: tuple[AttachmentEnvelope, ...]) -> list[ImageAttachment]:
+        images: list[ImageAttachment] = []
+        for attachment in attachments:
+            if len(images) >= self._MAX_IMAGE_ATTACHMENTS:
+                break
+            image_format = self._detect_image_format(attachment)
+            if image_format is None:
+                continue
+            if attachment.size is not None and attachment.size > self._MAX_IMAGE_BYTES:
+                continue
+            data = attachment.data
+            if data is None:
+                try:
+                    data = await asyncio.to_thread(self._download_limited_bytes, attachment.url)
+                except Exception as exc:
+                    logger.warning("Failed to load attachment image: %s (%s)", attachment.url, exc)
+                    continue
+            if len(data) > self._MAX_IMAGE_BYTES:
+                continue
+            images.append(ImageAttachment(format=image_format, data=data))
+        return images
+
     async def _handle_agent_memory(self, query: str) -> str:
         if not query:
             return "使い方: `/agent-memory 記録したい内容` または `/agent-memory 検索したい内容`"
@@ -296,7 +386,7 @@ class MessageProcessor:
             return
 
         content = message.content.strip()
-        if not content:
+        if not content and not message.attachments:
             return
 
         session_id = self.build_session_id(message)
@@ -322,22 +412,30 @@ class MessageProcessor:
             return
 
         agent_memory_query = self._extract_agent_memory_query(content)
+        image_attachments = await self._image_loader(message.attachments)
+        user_content = self._format_user_content_with_attachments(content, message.attachments)
 
         await self._store.append(
             session_id,
             role="user",
-            content=content,
+            content=user_content,
             author_id=message.author_id,
         )
 
         context = await self._store.get_context(session_id)
 
-        if self._processing_message and self._should_send_processing_message(content):
+        if self._processing_message and (
+            self._should_send_processing_message(content) or bool(message.attachments)
+        ):
             await send_reply(self._processing_message)
 
         try:
             reply = await self._runtime.generate_reply(
-                AgentRequest(session_id=session_id, context=context)
+                AgentRequest(
+                    session_id=session_id,
+                    context=context,
+                    image_attachments=tuple(image_attachments),
+                )
             )
         except Exception:
             logger.exception("Agent execution failed. session_id=%s", session_id)
@@ -356,6 +454,11 @@ class MessageProcessor:
             await send_reply(self._fallback_message)
             return
 
+        reply = self._normalize_reply(reply)
+        if not reply:
+            logger.warning("Runtime returned an empty reply. session_id=%s", session_id)
+            reply = self._fallback_message
+
         await self._store.append(
             session_id,
             role="assistant",
@@ -366,7 +469,7 @@ class MessageProcessor:
         await send_reply(reply)
 
 
-def _to_envelope(message: Any) -> MessageEnvelope:
+async def _to_envelope(message: Any) -> MessageEnvelope:
     guild = getattr(message, "guild", None)
     channel = getattr(message, "channel", None)
 
@@ -378,6 +481,34 @@ def _to_envelope(message: Any) -> MessageEnvelope:
             thread_id = str(thread.id)
 
     author = message.author
+    attachment_items: list[AttachmentEnvelope] = []
+    for attachment in getattr(message, "attachments", []):
+        url = str(getattr(attachment, "url", "") or "")
+        if not url:
+            continue
+        data: bytes | None = None
+        try:
+            read = getattr(attachment, "read", None)
+            if callable(read):
+                data = await read(use_cached=True)
+        except Exception as exc:
+            logger.warning("Failed to read Discord attachment bytes: %s (%s)", url, exc)
+        attachment_items.append(
+            AttachmentEnvelope(
+                filename=str(getattr(attachment, "filename", "")),
+                url=url,
+                content_type=(
+                    str(getattr(attachment, "content_type"))
+                    if getattr(attachment, "content_type", None) is not None
+                    else None
+                ),
+                size=int(getattr(attachment, "size"))
+                if getattr(attachment, "size", None) is not None
+                else None,
+                data=data,
+            )
+        )
+    attachments = tuple(attachment_items)
     return MessageEnvelope(
         message_id=str(message.id),
         content=str(message.content or ""),
@@ -386,6 +517,7 @@ def _to_envelope(message: Any) -> MessageEnvelope:
         guild_id=str(guild.id) if guild is not None else None,
         channel_id=str(channel.id),
         thread_id=thread_id,
+        attachments=attachments,
     )
 
 
@@ -404,7 +536,7 @@ class DeepbotClientFactory:
                 logger.info("Deepbot logged in as %s", self.user)
 
             async def on_message(self, message: Any) -> None:
-                envelope = _to_envelope(message)
+                envelope = await _to_envelope(message)
                 await processor.handle_message(
                     envelope,
                     send_reply=lambda text: message.channel.send(text),

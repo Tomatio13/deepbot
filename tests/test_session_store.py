@@ -45,3 +45,11 @@ async def test_session_store_clear() -> None:
 
     await store.clear("s1")
     assert await store.get_context("s1") == []
+
+
+@pytest.mark.asyncio
+async def test_session_store_ignores_empty_content() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=60)
+    await store.append("s1", role="user", content="   ", author_id="u1")
+
+    assert await store.get_context("s1") == []
