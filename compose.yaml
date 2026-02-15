@@ -1,6 +1,9 @@
 services:
   deepbot:
-    image: python:3.12-slim
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: deepbot:latest
     container_name: deepbot
     working_dir: /app
     env_file:
@@ -14,6 +17,12 @@ services:
       BYPASS_TOOL_CONSENT: "true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
     volumes:
       - ./:/app
       - ./config:/app/config:ro

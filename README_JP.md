@@ -44,6 +44,12 @@ cp .env.example .env
 - `mcp.json` の URL が `localhost` / `127.0.0.1` の場合、コンテナ内で `MCP_HOST_GATEWAY`（既定: `host.docker.internal`）へ自動変換されます。
 - agent-memory の保存先は既定で `${WORKSPACE_DIR}/agent-memory/memory` です（`AGENT_MEMORY_DIR` で上書き可能）。
 - コンテナ内でツールを非対話で実行するため、`STRANDS_TOOL_CONSOLE_MODE=disable` と `BYPASS_TOOL_CONSENT=true` の設定を推奨します。
+- Prompt defender の環境変数:
+  - `DEFENDER_ENABLED`
+  - `DEFENDER_DEFAULT_MODE`
+  - `DEFENDER_WARN_THRESHOLD`
+  - `DEFENDER_BLOCK_THRESHOLD`
+  - `DEFENDER_SANITIZE_MODE`
 
 4. `config/AGENT.md` を編集します（system prompt に自動反映）。
 5. 必要に応じて `config/skills/<skill-name>/SKILL.md` を作成します。
@@ -74,6 +80,8 @@ cp .env.example .env
 - デフォルトで `DEEPBOT_CONFIG_DIR=/app/config` を参照します。
 - Compose は `./config` をコンテナへ read-only マウントします。
 - Compose は `./workspace` を `/workspace` にマウントします（コンテナ出力をホスト側で参照可能）。
+- `srt`（`bubblewrap`）を使うため、Compose は `cap_add: [SYS_ADMIN, NET_ADMIN]` と `seccomp/apparmor` の unconfined 設定を使用します。
+- 本番運用時は `enableWeakerNestedSandbox` を `false`（デフォルト）にしてください。
 
 3. 起動:
 ```bash

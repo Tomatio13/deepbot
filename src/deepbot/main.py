@@ -7,6 +7,7 @@ from deepbot.config import ConfigError, load_config, to_runtime_settings
 from deepbot.gateway.discord_bot import AuthConfig, DeepbotClientFactory, MessageProcessor
 from deepbot.logging import setup_logging
 from deepbot.memory.session_store import SessionStore
+from deepbot.security import DefenderSettings, PromptInjectionDefender
 
 
 def main() -> None:
@@ -30,6 +31,15 @@ def main() -> None:
         runtime=runtime,
         fallback_message=config.bot_fallback_message,
         processing_message=config.bot_processing_message,
+        defender=PromptInjectionDefender(
+            DefenderSettings(
+                enabled=config.defender_enabled,
+                default_mode=config.defender_default_mode,
+                block_threshold=config.defender_block_threshold,
+                warn_threshold=config.defender_warn_threshold,
+                sanitize_mode=config.defender_sanitize_mode,
+            )
+        ),
         auth_config=AuthConfig(
             passphrase=config.auth_passphrase,
             idle_timeout_seconds=config.auth_idle_timeout_minutes * 60,

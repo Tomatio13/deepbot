@@ -44,6 +44,12 @@ cp .env.example .env
 - If a URL in `mcp.json` uses `localhost` / `127.0.0.1`, it is automatically converted to `MCP_HOST_GATEWAY` (default: `host.docker.internal`) in containers.
 - Agent memory write path defaults to `${WORKSPACE_DIR}/agent-memory/memory` (override with `AGENT_MEMORY_DIR`).
 - For non-interactive tool execution in containers, set `STRANDS_TOOL_CONSOLE_MODE=disable` and `BYPASS_TOOL_CONSENT=true`.
+- Prompt defender env vars:
+  - `DEFENDER_ENABLED`
+  - `DEFENDER_DEFAULT_MODE`
+  - `DEFENDER_WARN_THRESHOLD`
+  - `DEFENDER_BLOCK_THRESHOLD`
+  - `DEFENDER_SANITIZE_MODE`
 
 4. Edit `config/AGENT.md` (auto-reflected as system prompt).
 5. Add `config/skills/<skill-name>/SKILL.md` if needed.
@@ -74,6 +80,8 @@ cp .env.example .env
 - Default config directory is `DEEPBOT_CONFIG_DIR=/app/config`.
 - Compose mounts `./config` to the container as read-only.
 - Compose mounts `./workspace` to `/workspace` (you can inspect container outputs from host).
+- The container is configured with `cap_add: [SYS_ADMIN, NET_ADMIN]` and unconfined `seccomp`/`apparmor` to allow `bubblewrap`-based `srt` execution.
+- Keep `enableWeakerNestedSandbox` as `false` (default) for production use.
 
 3. Start:
 ```bash

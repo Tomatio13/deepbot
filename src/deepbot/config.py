@@ -37,6 +37,11 @@ class AppConfig:
     auth_max_retries: int
     auth_lock_minutes: int
     auth_command: str
+    defender_enabled: bool
+    defender_default_mode: str
+    defender_block_threshold: float
+    defender_warn_threshold: float
+    defender_sanitize_mode: str
 
 
 @dataclass(frozen=True)
@@ -121,6 +126,10 @@ def load_config() -> AppConfig:
     auth_max_retries = int(os.environ.get("AUTH_MAX_RETRIES", "3"))
     auth_lock_minutes = int(os.environ.get("AUTH_LOCK_MINUTES", "30"))
     auth_command = os.environ.get("AUTH_COMMAND", "/auth").strip() or "/auth"
+    defender_default_mode = os.environ.get("DEFENDER_DEFAULT_MODE", "warn").strip().lower() or "warn"
+    defender_sanitize_mode = os.environ.get("DEFENDER_SANITIZE_MODE", "full-redact").strip().lower() or "full-redact"
+    defender_block_threshold = float(os.environ.get("DEFENDER_BLOCK_THRESHOLD", "0.95"))
+    defender_warn_threshold = float(os.environ.get("DEFENDER_WARN_THRESHOLD", "0.35"))
 
     if auth_idle_timeout_minutes <= 0:
         raise ConfigError("AUTH_IDLE_TIMEOUT_MINUTES must be > 0")
@@ -132,6 +141,16 @@ def load_config() -> AppConfig:
         raise ConfigError("AUTH_LOCK_MINUTES must be > 0")
     if not auth_command.startswith("/"):
         raise ConfigError("AUTH_COMMAND must start with '/'")
+    if defender_default_mode not in {"warn", "sanitize", "block"}:
+        raise ConfigError("DEFENDER_DEFAULT_MODE must be one of: warn, sanitize, block")
+    if defender_sanitize_mode not in {"full-redact"}:
+        raise ConfigError("DEFENDER_SANITIZE_MODE must be 'full-redact'")
+    if not (0.0 <= defender_warn_threshold <= 1.0):
+        raise ConfigError("DEFENDER_WARN_THRESHOLD must be between 0 and 1")
+    if not (0.0 <= defender_block_threshold <= 1.0):
+        raise ConfigError("DEFENDER_BLOCK_THRESHOLD must be between 0 and 1")
+    if defender_warn_threshold > defender_block_threshold:
+        raise ConfigError("DEFENDER_WARN_THRESHOLD must be <= DEFENDER_BLOCK_THRESHOLD")
 
     return AppConfig(
         discord_bot_token=token,
@@ -162,6 +181,11 @@ def load_config() -> AppConfig:
         auth_max_retries=auth_max_retries,
         auth_lock_minutes=auth_lock_minutes,
         auth_command=auth_command,
+        defender_enabled=_parse_bool(os.environ.get("DEFENDER_ENABLED"), default=True),
+        defender_default_mode=defender_default_mode,
+        defender_block_threshold=defender_block_threshold,
+        defender_warn_threshold=defender_warn_threshold,
+        defender_sanitize_mode=defender_sanitize_mode,
     )
 
 

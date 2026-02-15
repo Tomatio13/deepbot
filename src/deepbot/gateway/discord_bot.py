@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from deepbot.agent.runtime import AgentRequest, AgentRuntime, ImageAttachment
 from deepbot.memory.session_store import SessionStore
+from deepbot.security import DefenderSettings, PromptInjectionDefender
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,12 @@ class MessageProcessor:
         r"([?？]|思い出|検索|探し|探して|どこ|いつ|何|覚えてる|決めた)",
         re.IGNORECASE,
     )
+    _DEFENDER_WARN_MESSAGE = (
+        "セキュリティ上の理由で入力を監査対象として処理します。"
+        "危険な指示・権限昇格・秘密情報要求には応答しません。"
+    )
+    _DEFENDER_BLOCK_MESSAGE = "セキュリティポリシーにより、この入力は処理できません。"
+    _DEFENDER_SANITIZE_NOTICE = "セキュリティ上の理由で入力を全文伏せして処理します。"
 
     def __init__(
         self,
@@ -91,6 +98,7 @@ class MessageProcessor:
         auth_config: AuthConfig | None = None,
         time_fn: Callable[[], float] | None = None,
         image_loader: Callable[[tuple[AttachmentEnvelope, ...]], Awaitable[list[ImageAttachment]]] | None = None,
+        defender: PromptInjectionDefender | None = None,
     ) -> None:
         self._store = store
         self._runtime = runtime
@@ -105,6 +113,7 @@ class MessageProcessor:
         )
         self._time_fn = time_fn or time.time
         self._image_loader = image_loader or self._load_image_attachments
+        self._defender = defender or PromptInjectionDefender(DefenderSettings.from_env())
         self._auth_states: dict[str, _AuthSessionState] = {}
         self._auth_lock = asyncio.Lock()
 
@@ -414,6 +423,26 @@ class MessageProcessor:
         agent_memory_query = self._extract_agent_memory_query(content)
         image_attachments = await self._image_loader(message.attachments)
         user_content = self._format_user_content_with_attachments(content, message.attachments)
+
+        if self._defender.enabled:
+            decision = self._defender.evaluate(user_content)
+            if decision.action != "pass":
+                logger.warning(
+                    "Prompt defense matched. session_id=%s action=%s score=%.2f categories=%s",
+                    session_id,
+                    decision.action,
+                    decision.score,
+                    ",".join(decision.categories),
+                )
+            if decision.action == "block":
+                await self._mark_activity(session_id, self._time_fn())
+                await send_reply(self._DEFENDER_BLOCK_MESSAGE)
+                return
+            if decision.action == "sanitize":
+                user_content = decision.redacted_text or PromptInjectionDefender.FULL_REDACT_TEXT
+                await send_reply(self._DEFENDER_SANITIZE_NOTICE)
+            elif decision.action == "warn":
+                await send_reply(self._DEFENDER_WARN_MESSAGE)
 
         await self._store.append(
             session_id,
