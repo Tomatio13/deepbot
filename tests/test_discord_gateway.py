@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 import types
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -10,8 +11,10 @@ from deepbot.agent.runtime import ImageAttachment
 from deepbot.gateway.discord_bot import (
     AttachmentEnvelope,
     AuthConfig,
+    ButtonIntent,
     MessageEnvelope,
     MessageProcessor,
+    UiIntent,
     _to_envelope,
 )
 from deepbot.memory.session_store import SessionStore
@@ -55,6 +58,30 @@ class LongReplyRuntime:
     async def generate_reply(self, request):
         self.calls += 1
         return "x" * self.size
+
+
+class StructuredReplyRuntime:
+    def __init__(self, payload: str) -> None:
+        self.calls = 0
+        self.payload = payload
+
+    async def generate_reply(self, request):
+        self.calls += 1
+        return self.payload
+
+
+class SequenceRuntime:
+    def __init__(self, responses: list[str]) -> None:
+        self.calls = 0
+        self.responses = list(responses)
+        self.requests: list[Any] = []
+
+    async def generate_reply(self, request):
+        self.calls += 1
+        self.requests.append(request)
+        if self.responses:
+            return self.responses.pop(0)
+        return "fallback-seq"
 
 
 PROCESSING = "お調べしますね。少しお待ちください。"
@@ -724,3 +751,169 @@ def test_attachment_url_validation_blocks_private_ip_resolution(monkeypatch: pyt
     ok, reason = processor._validate_attachment_url("https://cdn.discordapp.com/a.png")
     assert ok is False
     assert reason == "resolved_to_non_public_ip"
+
+
+@pytest.mark.asyncio
+async def test_structured_reply_forwards_ui_and_images() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = StructuredReplyRuntime(
+        payload='{"markdown":"## タイトル\\n本文","ui_intent":{"buttons":[{"label":"詳細","style":"primary","payload":"詳細です"}]},"images":["https://example.com/a.png"]}'
+    )
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+    sent: list[tuple[str, UiIntent | None, tuple[str, ...]]] = []
+
+    async def send_reply(
+        text: str,
+        *,
+        ui_intent: UiIntent | None = None,
+        image_urls: tuple[str, ...] = (),
+    ):
+        sent.append((text, ui_intent, image_urls))
+
+    await processor.handle_message(
+        MessageEnvelope(
+            message_id="1",
+            content="UI付きで返して",
+            author_id="u1",
+            author_is_bot=False,
+            guild_id="g1",
+            channel_id="c1",
+            thread_id=None,
+            attachments=(),
+        ),
+        send_reply=send_reply,
+    )
+
+    assert runtime.calls == 1
+    assert sent[-1][0] == "## タイトル\n本文"
+    assert sent[-1][2] == ("https://example.com/a.png",)
+    assert sent[-1][1] == UiIntent(
+        buttons=(ButtonIntent(label="詳細", style="primary", action=None, url=None, payload="詳細です"),)
+    )
+
+
+@pytest.mark.asyncio
+async def test_rerun_last_reply_generates_new_message() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = SequenceRuntime(
+        responses=[
+            "最初の返信",
+            '{"markdown":"再実行の返信","ui_intent":{"buttons":[{"label":"再実行","style":"primary","action":"rerun"}]}}',
+        ]
+    )
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+    sent: list[tuple[str, UiIntent | None, tuple[str, ...]]] = []
+
+    async def send_reply(
+        text: str,
+        *,
+        ui_intent: UiIntent | None = None,
+        image_urls: tuple[str, ...] = (),
+    ):
+        sent.append((text, ui_intent, image_urls))
+
+    message = MessageEnvelope(
+        message_id="1",
+        content="こんにちは",
+        author_id="u1",
+        author_is_bot=False,
+        guild_id="g1",
+        channel_id="c1",
+        thread_id=None,
+        attachments=(),
+    )
+    await processor.handle_message(message, send_reply=send_reply)
+
+    rerun_error = await processor.rerun_last_reply(
+        session_id=MessageProcessor.build_session_id(message),
+        actor_id="u1",
+        send_reply=send_reply,
+    )
+
+    assert rerun_error is None
+    assert runtime.calls == 2
+    assert sent[0][0] == "最初の返信"
+    assert sent[1][0] == "再実行の返信"
+    assert sent[1][1] == UiIntent(
+        buttons=(ButtonIntent(label="再実行", style="primary", action="rerun", url=None, payload=None),)
+    )
+    assert len(runtime.requests[1].context) == 1
+    assert runtime.requests[1].context[0]["role"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_explain_last_reply_appends_instruction_and_replies() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = SequenceRuntime(
+        responses=[
+            "最初の返信",
+            "詳しい説明です",
+        ]
+    )
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+    sent: list[tuple[str, UiIntent | None, tuple[str, ...]]] = []
+
+    async def send_reply(
+        text: str,
+        *,
+        ui_intent: UiIntent | None = None,
+        image_urls: tuple[str, ...] = (),
+    ):
+        sent.append((text, ui_intent, image_urls))
+
+    message = MessageEnvelope(
+        message_id="1",
+        content="概要を教えて",
+        author_id="u1",
+        author_is_bot=False,
+        guild_id="g1",
+        channel_id="c1",
+        thread_id=None,
+        attachments=(),
+    )
+    await processor.handle_message(message, send_reply=send_reply)
+
+    detail_error = await processor.explain_last_reply(
+        session_id=MessageProcessor.build_session_id(message),
+        actor_id="u1",
+        send_reply=send_reply,
+        instruction="さっきの回答を詳しく説明して",
+    )
+
+    assert detail_error is None
+    assert runtime.calls == 2
+    assert sent[1][0] == "詳しい説明です"
+    assert runtime.requests[1].context[-1]["role"] == "user"
+    assert runtime.requests[1].context[-1]["content"] == "さっきの回答を詳しく説明して"
+
+
+def test_extracts_markdown_image_urls_without_json() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = DummyRuntime()
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+
+    structured = processor._structured_reply_from_text(
+        "こちらです\n![img](https://example.com/a.png)\n![img2](https://example.com/b.jpg)"
+    )
+    assert structured.markdown.startswith("こちらです")
+    assert structured.image_urls == ("https://example.com/a.png", "https://example.com/b.jpg")

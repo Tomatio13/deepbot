@@ -20,6 +20,7 @@ Discord bot built with Strands Agents. It replies automatically to user messages
 - `/reset` command to clear session context
 - Skill execution from `config/skills` via `$skill_name` or `/skill_name`
 - Image attachment forwarding (`png/jpeg/gif/webp`) to model input
+- Prompt-driven rich replies via JSON (`markdown`, `ui_intent.buttons`, `images`) for buttons and image embeds
 
 ## ⚡ Quick Start (Beginner)
 1. Create `.env`

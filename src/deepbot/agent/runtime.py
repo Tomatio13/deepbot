@@ -132,7 +132,23 @@ class AgentRuntime:
                 )
                 continue
             lines.append(f"[{role}] {content}")
-        lines.append("Reply in Japanese, concise and helpful.")
+        lines.extend(
+            [
+                "",
+                "Reply in Japanese, concise and helpful.",
+                "Use emojis frequently where natural (about 1-3 emojis per short paragraph).",
+                "Use Markdown for normal answers.",
+                "If UI helps, you may return JSON only with this shape:",
+                '{"markdown":"<markdown text>","ui_intent":{"buttons":[{"label":"再実行","style":"primary","action":"rerun"}]},"images":["https://..."]}',
+                "Rules:",
+                "- markdown: required string when returning JSON",
+                "- ui_intent.buttons: up to 3 buttons",
+                "- button.style: primary|secondary|success|danger|link",
+                "- link style requires url",
+                "- images: optional absolute image URLs (https preferred)",
+                "- Do not wrap JSON in markdown fences",
+            ]
+        )
         return "\n".join(lines)
 
 

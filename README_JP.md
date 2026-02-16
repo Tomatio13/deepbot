@@ -20,6 +20,7 @@ Strands Agents を使った Discord Bot です。ユーザーの発言に自動�
 - `/reset` で会話コンテキストを初期化
 - `config/skills` の Skill を `$skill名` / `/skill名` で実行
 - 画像添付（`png/jpeg/gif/webp`）をモデル入力へ転送
+- JSON（`markdown`, `ui_intent.buttons`, `images`）による見せ方指定で、ボタンUIと画像Embedを返せる
 
 ## ⚡ 最短スタート（初心者向け）
 1. `.env` を作成

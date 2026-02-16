@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -68,6 +69,27 @@ class _AuthSessionState:
     locked_until: float | None = None
 
 
+@dataclass(frozen=True)
+class ButtonIntent:
+    label: str
+    style: str
+    action: str | None = None
+    url: str | None = None
+    payload: str | None = None
+
+
+@dataclass(frozen=True)
+class UiIntent:
+    buttons: tuple[ButtonIntent, ...] = ()
+
+
+@dataclass(frozen=True)
+class StructuredReply:
+    markdown: str
+    ui_intent: UiIntent | None = None
+    image_urls: tuple[str, ...] = ()
+
+
 class MessageProcessor:
     _SUPPORTED_IMAGE_FORMATS = {"png", "jpeg", "gif", "webp"}
     _MAX_IMAGE_ATTACHMENTS = 3
@@ -92,6 +114,10 @@ class MessageProcessor:
     _DEFENDER_SANITIZE_NOTICE = "セキュリティ上の理由で入力を全文伏せして処理します。"
     _DEFAULT_ALLOWED_ATTACHMENT_HOSTS = ("cdn.discordapp.com", "media.discordapp.net")
     _DISCORD_MAX_MESSAGE_LEN = 2000
+    _MAX_UI_BUTTONS = 3
+    _MAX_OUTPUT_IMAGES = 4
+    _IMAGE_MD_RE = re.compile(r"!\[[^\]]*\]\((https?://[^\s)]+)\)", re.IGNORECASE)
+    _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
 
     def __init__(
         self,
@@ -154,6 +180,142 @@ class MessageProcessor:
     @staticmethod
     def _normalize_reply(content: str) -> str:
         return content.strip()
+
+    @classmethod
+    def _extract_json_object_text(cls, content: str) -> str | None:
+        body = content.strip()
+        if body.startswith("{") and body.endswith("}"):
+            return body
+        match = cls._JSON_BLOCK_RE.search(body)
+        if match:
+            return match.group(1).strip()
+        return None
+
+    @staticmethod
+    def _normalize_image_url(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        url = value.strip()
+        if not url:
+            return None
+        parsed = urlparse(url)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return None
+        if not parsed.netloc:
+            return None
+        return url
+
+    @classmethod
+    def _extract_markdown_image_urls(cls, markdown: str) -> tuple[str, ...]:
+        urls: list[str] = []
+        for match in cls._IMAGE_MD_RE.finditer(markdown):
+            normalized = cls._normalize_image_url(match.group(1))
+            if normalized is None or normalized in urls:
+                continue
+            urls.append(normalized)
+            if len(urls) >= cls._MAX_OUTPUT_IMAGES:
+                break
+        return tuple(urls)
+
+    @classmethod
+    def _parse_ui_intent(cls, value: Any) -> UiIntent | None:
+        if not isinstance(value, dict):
+            return None
+        raw_buttons = value.get("buttons")
+        if not isinstance(raw_buttons, list):
+            return None
+
+        parsed_buttons: list[ButtonIntent] = []
+        for raw_button in raw_buttons:
+            if not isinstance(raw_button, dict):
+                continue
+            label = str(raw_button.get("label", "")).strip()
+            if not label:
+                continue
+            style = str(raw_button.get("style", "secondary")).strip().lower()
+            if style not in {"primary", "secondary", "success", "danger", "link"}:
+                style = "secondary"
+
+            url: str | None = None
+            if "url" in raw_button:
+                url = cls._normalize_image_url(raw_button.get("url"))
+            action = str(raw_button.get("action", "")).strip() or None
+            payload = str(raw_button.get("payload", "")).strip() or None
+
+            if style == "link" and url is None:
+                continue
+
+            parsed_buttons.append(
+                ButtonIntent(
+                    label=label[:80],
+                    style=style,
+                    action=action,
+                    url=url,
+                    payload=payload,
+                )
+            )
+            if len(parsed_buttons) >= cls._MAX_UI_BUTTONS:
+                break
+
+        if not parsed_buttons:
+            return None
+        return UiIntent(buttons=tuple(parsed_buttons))
+
+    @classmethod
+    def _structured_reply_from_text(cls, raw_reply: str) -> StructuredReply:
+        text = cls._normalize_reply(raw_reply)
+        json_text = cls._extract_json_object_text(text)
+        if json_text is None:
+            return StructuredReply(
+                markdown=text,
+                ui_intent=None,
+                image_urls=cls._extract_markdown_image_urls(text),
+            )
+
+        try:
+            payload = json.loads(json_text)
+        except json.JSONDecodeError:
+            return StructuredReply(
+                markdown=text,
+                ui_intent=None,
+                image_urls=cls._extract_markdown_image_urls(text),
+            )
+
+        if not isinstance(payload, dict):
+            return StructuredReply(
+                markdown=text,
+                ui_intent=None,
+                image_urls=cls._extract_markdown_image_urls(text),
+            )
+
+        markdown = str(payload.get("markdown", "")).strip()
+        if not markdown:
+            markdown = text
+
+        ui_intent = cls._parse_ui_intent(payload.get("ui_intent"))
+        image_urls: list[str] = []
+        raw_images = payload.get("images")
+        if isinstance(raw_images, list):
+            for item in raw_images:
+                normalized = cls._normalize_image_url(item)
+                if normalized is None or normalized in image_urls:
+                    continue
+                image_urls.append(normalized)
+                if len(image_urls) >= cls._MAX_OUTPUT_IMAGES:
+                    break
+
+        for md_image in cls._extract_markdown_image_urls(markdown):
+            if md_image in image_urls:
+                continue
+            image_urls.append(md_image)
+            if len(image_urls) >= cls._MAX_OUTPUT_IMAGES:
+                break
+
+        return StructuredReply(
+            markdown=markdown,
+            ui_intent=ui_intent,
+            image_urls=tuple(image_urls),
+        )
 
     def _extract_auth_attempt(self, content: str) -> str | None:
         command = self._auth_config.auth_command
@@ -218,13 +380,38 @@ class MessageProcessor:
             chunks.append(rest)
         return chunks
 
+    async def _send_reply_dispatch(
+        self,
+        send_reply: Callable[..., Awaitable[Any]],
+        text: str,
+        *,
+        ui_intent: UiIntent | None = None,
+        image_urls: tuple[str, ...] = (),
+    ) -> None:
+        try:
+            await send_reply(text, ui_intent=ui_intent, image_urls=image_urls)
+        except TypeError:
+            await send_reply(text)
+
     async def _send_reply_safely(
         self,
-        send_reply: Callable[[str], Awaitable[Any]],
+        send_reply: Callable[..., Awaitable[Any]],
         text: str,
+        *,
+        ui_intent: UiIntent | None = None,
+        image_urls: tuple[str, ...] = (),
     ) -> None:
-        for chunk in self._split_discord_message(text):
-            await send_reply(chunk)
+        chunks = self._split_discord_message(text)
+        if not chunks:
+            return
+        await self._send_reply_dispatch(
+            send_reply,
+            chunks[0],
+            ui_intent=ui_intent,
+            image_urls=image_urls,
+        )
+        for chunk in chunks[1:]:
+            await self._send_reply_dispatch(send_reply, chunk)
 
     async def _auth_response_for_attempt(self, session_id: str, attempt: str, now: float) -> str:
         config = self._auth_config
@@ -482,7 +669,7 @@ class MessageProcessor:
         self,
         message: MessageEnvelope,
         *,
-        send_reply: Callable[[str], Awaitable[Any]],
+        send_reply: Callable[..., Awaitable[Any]],
     ) -> None:
         if message.author_is_bot:
             return
@@ -570,25 +757,155 @@ class MessageProcessor:
                     author_id="deepbot",
                 )
                 await self._mark_activity(session_id, self._time_fn())
-                await self._send_reply_safely(send_reply, reply)
+                structured_fallback = self._structured_reply_from_text(reply)
+                await self._send_reply_safely(
+                    send_reply,
+                    structured_fallback.markdown,
+                    ui_intent=structured_fallback.ui_intent,
+                    image_urls=structured_fallback.image_urls,
+                )
                 return
             await self._mark_activity(session_id, self._time_fn())
             await self._send_reply_safely(send_reply, self._fallback_message)
             return
 
-        reply = self._normalize_reply(reply)
-        if not reply:
+        structured = self._structured_reply_from_text(reply)
+        if not structured.markdown:
             logger.warning("Runtime returned an empty reply. session_id=%s", session_id)
-            reply = self._fallback_message
+            structured = StructuredReply(markdown=self._fallback_message)
 
         await self._store.append(
             session_id,
             role="assistant",
-            content=reply,
+            content=structured.markdown,
             author_id="deepbot",
         )
         await self._mark_activity(session_id, self._time_fn())
-        await self._send_reply_safely(send_reply, reply)
+        await self._send_reply_safely(
+            send_reply,
+            structured.markdown,
+            ui_intent=structured.ui_intent,
+            image_urls=structured.image_urls,
+        )
+
+    async def rerun_last_reply(
+        self,
+        *,
+        session_id: str,
+        actor_id: str,
+        send_reply: Callable[..., Awaitable[Any]],
+    ) -> str | None:
+        now = self._time_fn()
+        if not await self._is_authenticated(session_id, now):
+            await self._mark_activity(session_id, now)
+            return await self._build_auth_prompt(session_id, now)
+
+        context = await self._store.get_context(session_id)
+        if not context:
+            return "再実行できる会話履歴がありません。"
+
+        rerun_context = [dict(item) for item in context]
+        if rerun_context and rerun_context[-1].get("role") == "assistant":
+            rerun_context.pop()
+        if not rerun_context:
+            return "再実行できる会話履歴がありません。"
+        if rerun_context[-1].get("role") != "user":
+            return "最後のユーザー入力が見つからないため、再実行できません。"
+
+        try:
+            reply = await self._runtime.generate_reply(
+                AgentRequest(
+                    session_id=session_id,
+                    context=rerun_context,
+                    image_attachments=(),
+                )
+            )
+        except Exception:
+            logger.exception("Rerun execution failed. session_id=%s actor_id=%s", session_id, actor_id)
+            await self._mark_activity(session_id, self._time_fn())
+            await self._send_reply_safely(send_reply, self._fallback_message)
+            return None
+
+        structured = self._structured_reply_from_text(reply)
+        if not structured.markdown:
+            structured = StructuredReply(markdown=self._fallback_message)
+
+        await self._store.append(
+            session_id,
+            role="assistant",
+            content=structured.markdown,
+            author_id="deepbot",
+        )
+        await self._mark_activity(session_id, self._time_fn())
+        await self._send_reply_safely(
+            send_reply,
+            structured.markdown,
+            ui_intent=structured.ui_intent,
+            image_urls=structured.image_urls,
+        )
+        return None
+
+    async def explain_last_reply(
+        self,
+        *,
+        session_id: str,
+        actor_id: str,
+        send_reply: Callable[..., Awaitable[Any]],
+        instruction: str | None = None,
+    ) -> str | None:
+        now = self._time_fn()
+        if not await self._is_authenticated(session_id, now):
+            await self._mark_activity(session_id, now)
+            return await self._build_auth_prompt(session_id, now)
+
+        context = await self._store.get_context(session_id)
+        if not context:
+            return "詳しく説明できる会話履歴がありません。"
+
+        prompt = (instruction or "").strip()
+        if not prompt:
+            prompt = "直前の回答を、背景・手順・具体例つきで詳しく説明してください。"
+
+        await self._store.append(
+            session_id,
+            role="user",
+            content=prompt,
+            author_id=actor_id,
+        )
+        latest_context = await self._store.get_context(session_id)
+
+        try:
+            reply = await self._runtime.generate_reply(
+                AgentRequest(
+                    session_id=session_id,
+                    context=latest_context,
+                    image_attachments=(),
+                )
+            )
+        except Exception:
+            logger.exception("Detail execution failed. session_id=%s actor_id=%s", session_id, actor_id)
+            await self._mark_activity(session_id, self._time_fn())
+            await self._send_reply_safely(send_reply, self._fallback_message)
+            return None
+
+        structured = self._structured_reply_from_text(reply)
+        if not structured.markdown:
+            structured = StructuredReply(markdown=self._fallback_message)
+
+        await self._store.append(
+            session_id,
+            role="assistant",
+            content=structured.markdown,
+            author_id="deepbot",
+        )
+        await self._mark_activity(session_id, self._time_fn())
+        await self._send_reply_safely(
+            send_reply,
+            structured.markdown,
+            ui_intent=structured.ui_intent,
+            image_urls=structured.image_urls,
+        )
+        return None
 
 
 async def _to_envelope(message: Any) -> MessageEnvelope:
@@ -645,6 +962,68 @@ async def _to_envelope(message: Any) -> MessageEnvelope:
 
 class DeepbotClientFactory:
     @staticmethod
+    def _button_style(discord_module: Any, name: str) -> Any:
+        style_map = {
+            "primary": discord_module.ButtonStyle.primary,
+            "secondary": discord_module.ButtonStyle.secondary,
+            "success": discord_module.ButtonStyle.success,
+            "danger": discord_module.ButtonStyle.danger,
+            "link": discord_module.ButtonStyle.link,
+        }
+        return style_map.get(name, discord_module.ButtonStyle.secondary)
+
+    @staticmethod
+    def _build_view(
+        discord_module: Any,
+        ui_intent: UiIntent | None,
+        *,
+        on_action: Callable[[Any, str, str | None], Awaitable[None]],
+    ) -> Any | None:
+        if ui_intent is None or not ui_intent.buttons:
+            return None
+
+        view = discord_module.ui.View(timeout=600)
+        for button_intent in ui_intent.buttons:
+            style = DeepbotClientFactory._button_style(discord_module, button_intent.style)
+            kwargs: dict[str, Any] = {"label": button_intent.label, "style": style}
+            if style == discord_module.ButtonStyle.link and button_intent.url:
+                kwargs["url"] = button_intent.url
+            button = discord_module.ui.Button(**kwargs)
+
+            if style != discord_module.ButtonStyle.link:
+                action = button_intent.action or "noop"
+                payload = button_intent.payload
+
+                async def _on_click(
+                    interaction: Any,
+                    *,
+                    resolved_action: str = action,
+                    resolved_payload: str | None = payload,
+                ) -> None:
+                    await on_action(interaction, resolved_action, resolved_payload)
+
+                button.callback = _on_click  # type: ignore[assignment]
+
+            view.add_item(button)
+        return view
+
+    @staticmethod
+    def _build_image_embeds(discord_module: Any, image_urls: tuple[str, ...]) -> list[Any]:
+        embeds: list[Any] = []
+        for image_url in image_urls:
+            embed = discord_module.Embed()
+            embed.set_image(url=image_url)
+            embeds.append(embed)
+        return embeds
+
+    @staticmethod
+    async def _send_interaction_ephemeral(interaction: Any, text: str) -> None:
+        if interaction.response.is_done():
+            await interaction.followup.send(text, ephemeral=True)
+            return
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @staticmethod
     def create(*, processor: MessageProcessor):
         import discord
 
@@ -659,9 +1038,77 @@ class DeepbotClientFactory:
 
             async def on_message(self, message: Any) -> None:
                 envelope = await _to_envelope(message)
+                session_id = MessageProcessor.build_session_id(envelope)
+                owner_user_id = envelope.author_id
+
+                async def _send_channel_reply(
+                    text: str,
+                    *,
+                    ui_intent: UiIntent | None = None,
+                    image_urls: tuple[str, ...] = (),
+                ) -> Any:
+                    view = DeepbotClientFactory._build_view(
+                        discord,
+                        ui_intent,
+                        on_action=_on_button_action,
+                    )
+                    embeds = DeepbotClientFactory._build_image_embeds(discord, image_urls)
+                    content = text if text else None
+                    if content is None and not embeds and view is None:
+                        content = " "
+                    return await message.channel.send(content=content, view=view, embeds=embeds)
+
+                async def _on_button_action(interaction: Any, action: str, payload: str | None) -> None:
+                    actor_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")
+                    if actor_id != owner_user_id:
+                        await DeepbotClientFactory._send_interaction_ephemeral(
+                            interaction,
+                            "このボタンはこの会話の本人のみ操作できます。",
+                        )
+                        return
+
+                    if action != "rerun":
+                        if action in {"detail", "details", "expand"}:
+                            if interaction.response.is_done():
+                                await interaction.followup.send("詳しい説明を生成します。", ephemeral=True)
+                            else:
+                                await interaction.response.send_message("詳しい説明を生成します。", ephemeral=True)
+                            error_message = await processor.explain_last_reply(
+                                session_id=session_id,
+                                actor_id=actor_id,
+                                send_reply=_send_channel_reply,
+                                instruction=payload,
+                            )
+                            if error_message:
+                                await interaction.followup.send(error_message, ephemeral=True)
+                                return
+                            await interaction.followup.send("詳しい説明を投稿しました。", ephemeral=True)
+                            return
+
+                        await DeepbotClientFactory._send_interaction_ephemeral(
+                            interaction,
+                            payload or "この操作はまだ未対応です。",
+                        )
+                        return
+
+                    if interaction.response.is_done():
+                        await interaction.followup.send("再実行を開始します。", ephemeral=True)
+                    else:
+                        await interaction.response.send_message("再実行を開始します。", ephemeral=True)
+
+                    error_message = await processor.rerun_last_reply(
+                        session_id=session_id,
+                        actor_id=actor_id,
+                        send_reply=_send_channel_reply,
+                    )
+                    if error_message:
+                        await interaction.followup.send(error_message, ephemeral=True)
+                        return
+                    await interaction.followup.send("再実行しました。", ephemeral=True)
+
                 await processor.handle_message(
                     envelope,
-                    send_reply=lambda text: message.channel.send(text),
+                    send_reply=_send_channel_reply,
                 )
 
         return DeepbotClient(intents=intents)
