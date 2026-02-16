@@ -12,114 +12,109 @@
   <img src="https://img.shields.io/badge/Test-pytest-0A9EDC?logo=pytest&logoColor=white" alt="pytest">
 </p>
 
-Discord bot built with Strands Agents. It replies to every user message automatically.
+Discord bot built with Strands Agents. It replies automatically to user messages.
 
-## 🚀 Features
-- Automatic replies to Discord messages via Strands Agent
-- Channel-level short-term memory (last N turns + TTL)
+## 🚀 What It Does
+- Auto-reply in Discord channels/threads
+- Per-user short-term memory per channel/thread
 - `/reset` command to clear session context
-- Model switching with `STRANDS_MODEL_PROVIDER` / `STRANDS_MODEL_CONFIG`
-- MCP server tool integration via `config/mcp.json` (container default: `/app/config/mcp.json`)
-- Loads Agent Skills from `config/skills` and runs them with `$skill_name` or `/skill_name`
-- Includes Discord attachment metadata in context and forwards supported image attachments (`png/jpeg/gif/webp`) to the model
-- Standard tools: `file_read`, `file_write`, `editor`, `shell`, `http_request`, `environment`, `calculator`, `current_time`
+- Skill execution from `config/skills` via `$skill_name` or `/skill_name`
+- Image attachment forwarding (`png/jpeg/gif/webp`) to model input
 
-## 🛠️ Setup
-1. Install dependencies.
-```bash
-pip install -e .[dev]
-```
-Run again after dependency updates, even if your virtual environment already exists.
-
-2. Create `.env`.
+## ⚡ Quick Start (Beginner)
+1. Create `.env`
 ```bash
 cp .env.example .env
 ```
-
-3. Set `DISCORD_BOT_TOKEN` and model settings.
-- If `STRANDS_MODEL_PROVIDER=openai`, `OPENAI_API_KEY` is required.
-- For OpenAI-compatible APIs, you can set `OPENAI_BASE_URL` (for example: `https://api.openai.com/v1`).
-- Model can be set with `STRANDS_MODEL_CONFIG.model_id` or `OPENAI_MODEL_ID` (`STRANDS_MODEL_ID` / `MODEL_ID` are also accepted).
-- MCP config path can be changed with `MCP_CONFIG_PATH` (default: `/app/config/mcp.json`).
-- If a URL in `mcp.json` uses `localhost` / `127.0.0.1`, it is automatically converted to `MCP_HOST_GATEWAY` (default: `host.docker.internal`) in containers.
-- Agent memory write path defaults to `${WORKSPACE_DIR}/agent-memory/memory` (override with `AGENT_MEMORY_DIR`).
-- For non-interactive tool execution in containers, set `STRANDS_TOOL_CONSOLE_MODE=disable` and `BYPASS_TOOL_CONSENT=true`.
-- Prompt defender env vars:
-  - `DEFENDER_ENABLED`
-  - `DEFENDER_DEFAULT_MODE`
-  - `DEFENDER_WARN_THRESHOLD`
-  - `DEFENDER_BLOCK_THRESHOLD`
-  - `DEFENDER_SANITIZE_MODE`
-
-4. Edit `config/AGENT.md` (auto-reflected as system prompt).
-5. Add `config/skills/<skill-name>/SKILL.md` if needed.
-- `SKILL.md` requires `name` and `description` in YAML frontmatter.
-- Example:
-  ```md
-  ---
-  name: reviewer
-  description: Document review workflow
-  ---
-  ```
-
-Provider note:
-- When `STRANDS_MODEL_PROVIDER=openai`, the `openai` package is required (already included in project dependencies).
-
-## ▶️ Run
+2. Set these 3 values first
+- `DISCORD_BOT_TOKEN`
+- `OPENAI_API_KEY`
+- `AUTH_PASSPHRASE` (must not be empty)
+3. Build and run
 ```bash
-deepbot
-```
-
-## 🐳 Run with Docker Compose
-1. Create `.env`.
-```bash
-cp .env.example .env
-```
-
-2. Set required environment variables (for example `DISCORD_BOT_TOKEN`).
-- Default config directory is `DEEPBOT_CONFIG_DIR=/app/config`.
-- Compose mounts `./config` to the container as read-only.
-- Compose mounts `./workspace` to `/workspace` (you can inspect container outputs from host).
-- The container is configured with `cap_add: [SYS_ADMIN, NET_ADMIN]` and unconfined `seccomp`/`apparmor` to allow `bubblewrap`-based `srt` execution.
-- Keep `enableWeakerNestedSandbox` as `false` (default) for production use.
-
-3. Start:
-```bash
+docker compose build deepbot
 docker compose up -d
-```
-
-4. Check logs:
-```bash
 docker compose logs -f deepbot
 ```
 
-5. Stop:
+## 🐳 Docker Compose Behavior
+- Runs code from built image (`/app` is not bind-mounted).
+- Mounts `./config` to `/app/config` as read-only.
+- Mounts `./workspace` to `/workspace` as read-write.
+- Uses `SYS_ADMIN/NET_ADMIN` and unconfined `seccomp/apparmor` for `srt` (`bubblewrap`).
+- `srt` filesystem policy blocks read/write access to `/app` and only allows writes under `/workspace` and `/tmp`.
+- Rebuild after code changes:
 ```bash
-docker compose down
+docker compose build deepbot
+docker compose up -d
 ```
 
-Skill usage example:
-- Send `$reviewer Improve this README` or `/reviewer Improve this README` in Discord to run the matching skill.
+## ⚙️ Configuration Guide (.env)
+Use this section to understand which values matter first.
 
-## 🧠 Session Behavior
+### 1. Required
+- `DISCORD_BOT_TOKEN`: Discord bot token
+- `OPENAI_API_KEY`: OpenAI API key
+- `AUTH_PASSPHRASE`: passphrase for `/auth`
+
+### 2. Usually Keep Defaults
+- `OPENAI_MODEL_ID`
+- `SESSION_MAX_TURNS`, `SESSION_TTL_MINUTES`
+- `BOT_FALLBACK_MESSAGE`
+- `BOT_PROCESSING_MESSAGE`
+- `LOG_LEVEL`
+
+### 3. Security Controls (Important)
+- `AUTH_REQUIRED=true`
+- `AUTH_COMMAND`
+- `AUTH_IDLE_TIMEOUT_MINUTES`
+- `AUTH_WINDOW_MINUTES`
+- `AUTH_MAX_RETRIES`, `AUTH_LOCK_MINUTES`
+- `DEFENDER_*` (prompt-injection defense)
+- `ATTACHMENT_ALLOWED_HOSTS` (remote attachment allowlist)
+
+### 4. Dangerous Tool Controls (Advanced)
+- `DANGEROUS_TOOLS_ENABLED=false` (recommended default)
+- `ENABLED_DANGEROUS_TOOLS`
+- `SHELL_SRT_ENFORCED=true`
+- `SHELL_SRT_SETTINGS_PATH`
+- `SHELL_DENY_PATH_PREFIXES=/app`
+- `TOOL_WRITE_ROOTS` (applies to `file_read` / `file_write` / `editor`)
+
+Minimal example for dangerous tools:
+```env
+DANGEROUS_TOOLS_ENABLED=true
+ENABLED_DANGEROUS_TOOLS=shell,file_read
+SHELL_SRT_ENFORCED=true
+SHELL_DENY_PATH_PREFIXES=/app
+TOOL_WRITE_ROOTS=/workspace
+```
+
+## 🧩 Related Files
+- `config/AGENT.md`: system prompt content
+- `config/mcp.json`: MCP server config
+- `config/skills/<name>/SKILL.md`: custom skills
+
+Minimal `SKILL.md`:
+```md
+---
+name: reviewer
+description: Document review workflow
+---
+```
+
+## 🧠 Session IDs
 - DM: `dm:{user_id}`
-- Guild channel: `guild:{guild_id}:channel:{channel_id}`
-- Thread: `thread:{thread_id}`
-
-Retention policy:
-- `SESSION_MAX_TURNS` (internally retains twice the message count)
-- Session is discarded after `SESSION_TTL_MINUTES`
+- Guild channel: `guild:{guild_id}:channel:{channel_id}:user:{user_id}`
+- Thread: `thread:{thread_id}:user:{user_id}`
 
 ## 🧪 Test
 ```bash
 pytest -q
 ```
 
-## 📌 Notes
-- Auto-reply to every message may hit rate limits.
-- The bot does not reply to its own messages.
-- It loads `config/AGENT.md` (falls back to default prompt if missing).
-- `BOT_PROCESSING_MESSAGE` controls the pre-reply text for research-like inputs (URL, `$skill`, questions, search/latest keywords). Set empty to disable.
-- Set `AUTH_PASSPHRASE` to require `/auth <passphrase>` after idle timeout (`AUTH_IDLE_TIMEOUT_MINUTES`), with temporary access window (`AUTH_WINDOW_MINUTES`) and lockout (`AUTH_MAX_RETRIES`, `AUTH_LOCK_MINUTES`).
-- In secure default mode, only `http_request`, `calculator`, and `current_time` are enabled.
-- Set `DANGEROUS_TOOLS_ENABLED=true` to enable `file_read`, `file_write`, `editor`, `environment`, and `shell` (trusted environments only).
+## 📌 Troubleshooting
+1. Startup error: check `AUTH_PASSPHRASE` is not empty
+2. Config changes not applied: run `docker compose build deepbot`
+3. Tool unavailable: check `DANGEROUS_TOOLS_ENABLED` and `ENABLED_DANGEROUS_TOOLS`
+4. Shell rejected: use `srt --settings ... -c "<command>"`

@@ -24,9 +24,6 @@ services:
       - seccomp=unconfined
       - apparmor=unconfined
     volumes:
-      - ./:/app
       - ./config:/app/config:ro
       - ./workspace:/workspace
-    command: >
-      sh -c "pip install --no-cache-dir -e . && sh /app/scripts/docker-entrypoint.sh deepbot"
     restart: unless-stopped

@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import ipaddress
 import logging
 import os
 import re
+import socket
 import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
+from urllib.parse import urlparse
 
 from deepbot.agent.runtime import AgentRequest, AgentRuntime, ImageAttachment
 from deepbot.memory.session_store import SessionStore
@@ -87,6 +90,8 @@ class MessageProcessor:
     )
     _DEFENDER_BLOCK_MESSAGE = "セキュリティポリシーにより、この入力は処理できません。"
     _DEFENDER_SANITIZE_NOTICE = "セキュリティ上の理由で入力を全文伏せして処理します。"
+    _DEFAULT_ALLOWED_ATTACHMENT_HOSTS = ("cdn.discordapp.com", "media.discordapp.net")
+    _DISCORD_MAX_MESSAGE_LEN = 2000
 
     def __init__(
         self,
@@ -99,6 +104,7 @@ class MessageProcessor:
         time_fn: Callable[[], float] | None = None,
         image_loader: Callable[[tuple[AttachmentEnvelope, ...]], Awaitable[list[ImageAttachment]]] | None = None,
         defender: PromptInjectionDefender | None = None,
+        allowed_attachment_hosts: tuple[str, ...] | None = None,
     ) -> None:
         self._store = store
         self._runtime = runtime
@@ -114,6 +120,11 @@ class MessageProcessor:
         self._time_fn = time_fn or time.time
         self._image_loader = image_loader or self._load_image_attachments
         self._defender = defender or PromptInjectionDefender(DefenderSettings.from_env())
+        self._allowed_attachment_hosts = tuple(
+            host.lower()
+            for host in (allowed_attachment_hosts or self._DEFAULT_ALLOWED_ATTACHMENT_HOSTS)
+            if host and host.strip()
+        )
         self._auth_states: dict[str, _AuthSessionState] = {}
         self._auth_lock = asyncio.Lock()
 
@@ -182,6 +193,38 @@ class MessageProcessor:
     def _seconds_to_minutes_text(seconds: float) -> str:
         minutes = max(1, int((seconds + 59) // 60))
         return f"{minutes}分"
+
+    @classmethod
+    def _split_discord_message(cls, text: str) -> list[str]:
+        body = text.strip()
+        if not body:
+            return [""]
+        if len(body) <= cls._DISCORD_MAX_MESSAGE_LEN:
+            return [body]
+
+        chunks: list[str] = []
+        rest = body
+        while len(rest) > cls._DISCORD_MAX_MESSAGE_LEN:
+            split_at = rest.rfind("\n", 0, cls._DISCORD_MAX_MESSAGE_LEN + 1)
+            if split_at <= 0:
+                split_at = cls._DISCORD_MAX_MESSAGE_LEN
+            chunk = rest[:split_at].rstrip()
+            if not chunk:
+                chunk = rest[: cls._DISCORD_MAX_MESSAGE_LEN]
+                split_at = cls._DISCORD_MAX_MESSAGE_LEN
+            chunks.append(chunk)
+            rest = rest[split_at:].lstrip("\n")
+        if rest:
+            chunks.append(rest)
+        return chunks
+
+    async def _send_reply_safely(
+        self,
+        send_reply: Callable[[str], Awaitable[Any]],
+        text: str,
+    ) -> None:
+        for chunk in self._split_discord_message(text):
+            await send_reply(chunk)
 
     async def _auth_response_for_attempt(self, session_id: str, attempt: str, now: float) -> str:
         config = self._auth_config
@@ -311,11 +354,61 @@ class MessageProcessor:
             return suffix
         return None
 
-    @classmethod
-    def _download_limited_bytes(cls, url: str) -> bytes:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            data = response.read(cls._MAX_IMAGE_BYTES + 1)
-        if len(data) > cls._MAX_IMAGE_BYTES:
+    @staticmethod
+    def _is_public_ip_address(value: str) -> bool:
+        try:
+            ip = ipaddress.ip_address(value)
+        except ValueError:
+            return False
+        return not (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        )
+
+    def _validate_attachment_url(self, url: str) -> tuple[bool, str]:
+        parsed = urlparse(url)
+        if parsed.scheme.lower() != "https":
+            return False, "scheme_not_https"
+        if parsed.username or parsed.password:
+            return False, "userinfo_not_allowed"
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False, "missing_host"
+        if host not in self._allowed_attachment_hosts:
+            return False, "host_not_allowlisted"
+        try:
+            infos = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
+        except Exception:
+            return False, "dns_resolution_failed"
+        resolved_ips = {info[4][0] for info in infos if info and info[4]}
+        if not resolved_ips:
+            return False, "dns_empty"
+        for resolved_ip in resolved_ips:
+            if not self._is_public_ip_address(resolved_ip):
+                return False, "resolved_to_non_public_ip"
+        return True, "ok"
+
+    def _download_limited_bytes(self, url: str) -> bytes:
+        ok, reason = self._validate_attachment_url(url)
+        if not ok:
+            raise ValueError(f"attachment_url_rejected:{reason}")
+
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+                return None
+
+        request = urllib.request.Request(url, headers={"User-Agent": "deepbot/1.0"})
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(request, timeout=10) as response:
+            content_type = str(response.headers.get("Content-Type", "")).lower()
+            if content_type and not content_type.startswith("image/"):
+                raise ValueError("unexpected_content_type")
+            data = response.read(self._MAX_IMAGE_BYTES + 1)
+        if len(data) > self._MAX_IMAGE_BYTES:
             raise ValueError("attachment too large")
         return data
 
@@ -380,9 +473,9 @@ class MessageProcessor:
     @staticmethod
     def build_session_id(message: MessageEnvelope) -> str:
         if message.thread_id:
-            return f"thread:{message.thread_id}"
+            return f"thread:{message.thread_id}:user:{message.author_id}"
         if message.guild_id:
-            return f"guild:{message.guild_id}:channel:{message.channel_id}"
+            return f"guild:{message.guild_id}:channel:{message.channel_id}:user:{message.author_id}"
         return f"dm:{message.author_id}"
 
     async def handle_message(
@@ -404,7 +497,7 @@ class MessageProcessor:
         if content == "/reset":
             await self._store.clear(session_id)
             await self._clear_auth_state(session_id)
-            await send_reply("このチャンネルの会話コンテキストをリセットしました。")
+            await self._send_reply_safely(send_reply, "このチャンネルの会話コンテキストをリセットしました。")
             return
 
         auth_attempt = self._extract_auth_attempt(content)
@@ -412,12 +505,12 @@ class MessageProcessor:
             auth_response = await self._auth_response_for_attempt(session_id, auth_attempt, now)
             if auth_response.startswith("認証に成功しました。"):
                 await self._store.clear(session_id)
-            await send_reply(auth_response)
+            await self._send_reply_safely(send_reply, auth_response)
             return
 
         if not await self._is_authenticated(session_id, now):
             await self._mark_activity(session_id, now)
-            await send_reply(await self._build_auth_prompt(session_id, now))
+            await self._send_reply_safely(send_reply, await self._build_auth_prompt(session_id, now))
             return
 
         agent_memory_query = self._extract_agent_memory_query(content)
@@ -436,13 +529,13 @@ class MessageProcessor:
                 )
             if decision.action == "block":
                 await self._mark_activity(session_id, self._time_fn())
-                await send_reply(self._DEFENDER_BLOCK_MESSAGE)
+                await self._send_reply_safely(send_reply, self._DEFENDER_BLOCK_MESSAGE)
                 return
             if decision.action == "sanitize":
                 user_content = decision.redacted_text or PromptInjectionDefender.FULL_REDACT_TEXT
-                await send_reply(self._DEFENDER_SANITIZE_NOTICE)
+                await self._send_reply_safely(send_reply, self._DEFENDER_SANITIZE_NOTICE)
             elif decision.action == "warn":
-                await send_reply(self._DEFENDER_WARN_MESSAGE)
+                await self._send_reply_safely(send_reply, self._DEFENDER_WARN_MESSAGE)
 
         await self._store.append(
             session_id,
@@ -456,7 +549,7 @@ class MessageProcessor:
         if self._processing_message and (
             self._should_send_processing_message(content) or bool(message.attachments)
         ):
-            await send_reply(self._processing_message)
+            await self._send_reply_safely(send_reply, self._processing_message)
 
         try:
             reply = await self._runtime.generate_reply(
@@ -477,10 +570,10 @@ class MessageProcessor:
                     author_id="deepbot",
                 )
                 await self._mark_activity(session_id, self._time_fn())
-                await send_reply(reply)
+                await self._send_reply_safely(send_reply, reply)
                 return
             await self._mark_activity(session_id, self._time_fn())
-            await send_reply(self._fallback_message)
+            await self._send_reply_safely(send_reply, self._fallback_message)
             return
 
         reply = self._normalize_reply(reply)
@@ -495,7 +588,7 @@ class MessageProcessor:
             author_id="deepbot",
         )
         await self._mark_activity(session_id, self._time_fn())
-        await send_reply(reply)
+        await self._send_reply_safely(send_reply, reply)
 
 
 async def _to_envelope(message: Any) -> MessageEnvelope:

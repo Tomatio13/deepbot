@@ -31,7 +31,13 @@ class AppConfig:
     bot_processing_message: str
     log_level: str
     dangerous_tools_enabled: bool
+    enabled_dangerous_tools: tuple[str, ...]
+    shell_srt_enforced: bool
+    shell_srt_settings_path: str
+    shell_deny_path_prefixes: tuple[str, ...]
+    tool_write_roots: tuple[str, ...]
     auth_passphrase: str
+    auth_required: bool
     auth_idle_timeout_minutes: int
     auth_window_minutes: int
     auth_max_retries: int
@@ -42,6 +48,7 @@ class AppConfig:
     defender_block_threshold: float
     defender_warn_threshold: float
     defender_sanitize_mode: str
+    attachment_allowed_hosts: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -55,6 +62,13 @@ def _parse_bool(value: str | None, *, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_csv(raw: str | None) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    items = [item.strip().lower() for item in raw.split(",")]
+    return tuple(item for item in items if item)
 
 
 def _parse_json_or_file(raw: str | None) -> dict[str, Any]:
@@ -121,6 +135,17 @@ def load_config() -> AppConfig:
         )
 
     auth_passphrase = os.environ.get("AUTH_PASSPHRASE", "").strip()
+    enabled_dangerous_tools = _parse_csv(
+        os.environ.get("ENABLED_DANGEROUS_TOOLS", "shell,file_read")
+    )
+    shell_srt_enforced = _parse_bool(os.environ.get("SHELL_SRT_ENFORCED"), default=True)
+    shell_srt_settings_path = (
+        os.environ.get("SHELL_SRT_SETTINGS_PATH", "/app/config/srt-settings.json").strip()
+        or "/app/config/srt-settings.json"
+    )
+    shell_deny_path_prefixes = _parse_csv(os.environ.get("SHELL_DENY_PATH_PREFIXES", "/app"))
+    tool_write_roots = _parse_csv(os.environ.get("TOOL_WRITE_ROOTS", "/workspace"))
+    auth_required = _parse_bool(os.environ.get("AUTH_REQUIRED"), default=True)
     auth_idle_timeout_minutes = int(os.environ.get("AUTH_IDLE_TIMEOUT_MINUTES", "15"))
     auth_window_minutes = int(os.environ.get("AUTH_WINDOW_MINUTES", "10"))
     auth_max_retries = int(os.environ.get("AUTH_MAX_RETRIES", "3"))
@@ -133,6 +158,25 @@ def load_config() -> AppConfig:
 
     if auth_idle_timeout_minutes <= 0:
         raise ConfigError("AUTH_IDLE_TIMEOUT_MINUTES must be > 0")
+    supported_dangerous_tools = {"file_read", "file_write", "editor", "environment", "shell"}
+    invalid_dangerous_tools = [name for name in enabled_dangerous_tools if name not in supported_dangerous_tools]
+    if invalid_dangerous_tools:
+        raise ConfigError(
+            "ENABLED_DANGEROUS_TOOLS contains unsupported tools: "
+            + ", ".join(sorted(invalid_dangerous_tools))
+        )
+    if not shell_srt_settings_path.startswith("/"):
+        raise ConfigError("SHELL_SRT_SETTINGS_PATH must be an absolute path")
+    if not shell_deny_path_prefixes:
+        raise ConfigError("SHELL_DENY_PATH_PREFIXES must include at least one prefix")
+    if any(not prefix.startswith("/") for prefix in shell_deny_path_prefixes):
+        raise ConfigError("SHELL_DENY_PATH_PREFIXES must contain absolute prefixes")
+    if not tool_write_roots:
+        raise ConfigError("TOOL_WRITE_ROOTS must include at least one root path")
+    if any(not root.startswith("/") for root in tool_write_roots):
+        raise ConfigError("TOOL_WRITE_ROOTS must contain absolute paths")
+    if auth_required and not auth_passphrase:
+        raise ConfigError("AUTH_PASSPHRASE is required when AUTH_REQUIRED=true")
     if auth_window_minutes <= 0:
         raise ConfigError("AUTH_WINDOW_MINUTES must be > 0")
     if auth_max_retries <= 0:
@@ -151,6 +195,15 @@ def load_config() -> AppConfig:
         raise ConfigError("DEFENDER_BLOCK_THRESHOLD must be between 0 and 1")
     if defender_warn_threshold > defender_block_threshold:
         raise ConfigError("DEFENDER_WARN_THRESHOLD must be <= DEFENDER_BLOCK_THRESHOLD")
+
+    attachment_allowed_hosts = _parse_csv(
+        os.environ.get(
+            "ATTACHMENT_ALLOWED_HOSTS",
+            "cdn.discordapp.com,media.discordapp.net",
+        )
+    )
+    if not attachment_allowed_hosts:
+        raise ConfigError("ATTACHMENT_ALLOWED_HOSTS must include at least one host")
 
     return AppConfig(
         discord_bot_token=token,
@@ -175,7 +228,13 @@ def load_config() -> AppConfig:
             os.environ.get("DANGEROUS_TOOLS_ENABLED"),
             default=False,
         ),
+        enabled_dangerous_tools=enabled_dangerous_tools,
+        shell_srt_enforced=shell_srt_enforced,
+        shell_srt_settings_path=shell_srt_settings_path,
+        shell_deny_path_prefixes=shell_deny_path_prefixes,
+        tool_write_roots=tool_write_roots,
         auth_passphrase=auth_passphrase,
+        auth_required=auth_required,
         auth_idle_timeout_minutes=auth_idle_timeout_minutes,
         auth_window_minutes=auth_window_minutes,
         auth_max_retries=auth_max_retries,
@@ -186,6 +245,7 @@ def load_config() -> AppConfig:
         defender_block_threshold=defender_block_threshold,
         defender_warn_threshold=defender_warn_threshold,
         defender_sanitize_mode=defender_sanitize_mode,
+        attachment_allowed_hosts=attachment_allowed_hosts,
     )
 
 

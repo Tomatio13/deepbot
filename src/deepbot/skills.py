@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from deepbot.security.normalizer import sanitize_for_prompt
+
 SKILL_PREFIX_RE = re.compile(
     r"^(?:<@!?\d+>\s*)*(?:[$/])(?P<name>[a-zA-Z0-9_-]+)(?:\s+(?P<rest>.*))?$",
     re.DOTALL,
@@ -78,15 +80,20 @@ def build_skills_discovery_prompt(skills: list[Skill]) -> str | None:
         "Available skills:",
     ]
     for skill in skills:
-        lines.append(f"- {skill.name}: {skill.description} (path: {skill.path})")
+        safe_name = sanitize_for_prompt(skill.name)
+        safe_description = sanitize_for_prompt(skill.description)
+        safe_path = sanitize_for_prompt(str(skill.path))
+        lines.append(f"- {safe_name}: {safe_description} (path: {safe_path})")
     return "\n".join(lines)
 
 
 def build_selected_skill_prompt(skill: Skill) -> str:
+    safe_name = sanitize_for_prompt(skill.name)
+    safe_path = sanitize_for_prompt(str(skill.path))
     return (
         "## Selected Skill\n"
-        f"Name: {skill.name}\n"
-        f"Path: {skill.path}\n\n"
+        f"Name: {safe_name}\n"
+        f"Path: {safe_path}\n\n"
         "<skill_instructions>\n"
         f"{skill.content}\n"
         "</skill_instructions>"

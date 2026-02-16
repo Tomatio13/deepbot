@@ -48,6 +48,7 @@ def main() -> None:
             lock_seconds=config.auth_lock_minutes * 60,
             auth_command=config.auth_command,
         ),
+        allowed_attachment_hosts=config.attachment_allowed_hosts,
     )
     client = DeepbotClientFactory.create(processor=processor)
 

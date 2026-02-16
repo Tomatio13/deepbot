@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import types
 from types import SimpleNamespace
 
@@ -44,6 +45,16 @@ class EmptyReplyRuntime:
     async def generate_reply(self, request):
         self.calls += 1
         return "   "
+
+
+class LongReplyRuntime:
+    def __init__(self, size: int = 4100) -> None:
+        self.calls = 0
+        self.size = size
+
+    async def generate_reply(self, request):
+        self.calls += 1
+        return "x" * self.size
 
 
 PROCESSING = "お調べしますね。少しお待ちください。"
@@ -118,8 +129,8 @@ async def test_auto_reply_and_context_saved() -> None:
     await processor.handle_message(message, send_reply=send_reply)
 
     assert runtime.calls == 1
-    assert sent == ["reply:guild:g1:channel:c1"]
-    ctx = await store.get_context("guild:g1:channel:c1")
+    assert sent == ["reply:guild:g1:channel:c1:user:u1"]
+    ctx = await store.get_context("guild:g1:channel:c1:user:u1")
     assert len(ctx) == 2
 
 
@@ -152,7 +163,7 @@ async def test_processing_message_sent_for_search_like_input() -> None:
     await processor.handle_message(message, send_reply=send_reply)
 
     assert runtime.calls == 1
-    assert sent == [PROCESSING, "reply:guild:g1:channel:c1"]
+    assert sent == [PROCESSING, "reply:guild:g1:channel:c1:user:u1"]
 
 
 @pytest.mark.asyncio
@@ -197,7 +208,7 @@ async def test_reset_command_clears_context() -> None:
         send_reply=send_reply,
     )
 
-    assert await store.get_context("guild:g1:channel:c1") == []
+    assert await store.get_context("guild:g1:channel:c1:user:u1") == []
 
 
 @pytest.mark.asyncio
@@ -272,7 +283,7 @@ async def test_uses_fallback_when_runtime_returns_empty_reply() -> None:
 
     assert runtime.calls == 1
     assert sent == ["fallback"]
-    ctx = await store.get_context("guild:g1:channel:c1")
+    ctx = await store.get_context("guild:g1:channel:c1:user:u1")
     assert [m["content"] for m in ctx] == ["こんにちは", "fallback"]
 
 
@@ -360,7 +371,7 @@ async def test_defender_warn_mode_keeps_processing() -> None:
 
     assert runtime.calls == 1
     assert any("セキュリティ上の理由で入力を監査対象" in text for text in sent)
-    assert sent[-1] == "reply:guild:g1:channel:c1"
+    assert sent[-1] == "reply:guild:g1:channel:c1:user:u1"
 
 
 @pytest.mark.asyncio
@@ -401,7 +412,7 @@ async def test_defender_sanitize_mode_redacts_input() -> None:
         send_reply=send_reply,
     )
 
-    ctx = await store.get_context("guild:g1:channel:c1")
+    ctx = await store.get_context("guild:g1:channel:c1:user:u1")
     assert ctx[0]["content"] == "[REDACTED_BY_SECURITY_POLICY]"
     assert any("全文伏せ" in text for text in sent)
 
@@ -574,7 +585,7 @@ async def test_attachment_only_message_is_forwarded_to_runtime() -> None:
     )
 
     assert runtime.calls == 1
-    assert sent == [PROCESSING, "reply:guild:g1:channel:c1"]
+    assert sent == [PROCESSING, "reply:guild:g1:channel:c1:user:u1"]
     assert runtime.last_request is not None
     assert "https://cdn.example/cat.png" in runtime.last_request.context[-1]["content"]
     assert len(runtime.last_request.image_attachments) == 1
@@ -609,3 +620,107 @@ async def test_to_envelope_includes_attachment_metadata() -> None:
     assert envelope.attachments[0].filename == "dog.jpg"
     assert envelope.attachments[0].url == "https://cdn.example/dog.jpg"
     assert envelope.attachments[0].data == b"img-bytes"
+
+
+@pytest.mark.asyncio
+async def test_long_reply_is_split_to_fit_discord_limit() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = LongReplyRuntime(size=4500)
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+    sent: list[str] = []
+
+    async def send_reply(text: str):
+        sent.append(text)
+
+    await processor.handle_message(
+        MessageEnvelope(
+            message_id="1",
+            content="長文を返して",
+            author_id="u1",
+            author_is_bot=False,
+            guild_id="g1",
+            channel_id="c1",
+            thread_id=None,
+            attachments=(),
+        ),
+        send_reply=send_reply,
+    )
+
+    assert runtime.calls == 1
+    assert len(sent) >= 3
+    assert all(len(chunk) <= 2000 for chunk in sent)
+
+
+def test_session_id_isolated_per_user_in_same_channel() -> None:
+    user1 = MessageEnvelope(
+        message_id="1",
+        content="hi",
+        author_id="u1",
+        author_is_bot=False,
+        guild_id="g1",
+        channel_id="c1",
+        thread_id=None,
+        attachments=(),
+    )
+    user2 = MessageEnvelope(
+        message_id="2",
+        content="hi",
+        author_id="u2",
+        author_is_bot=False,
+        guild_id="g1",
+        channel_id="c1",
+        thread_id=None,
+        attachments=(),
+    )
+
+    assert MessageProcessor.build_session_id(user1) == "guild:g1:channel:c1:user:u1"
+    assert MessageProcessor.build_session_id(user2) == "guild:g1:channel:c1:user:u2"
+
+
+def test_attachment_url_validation_blocks_non_allowlisted_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = DummyRuntime()
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+        allowed_attachment_hosts=("cdn.discordapp.com",),
+    )
+
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ],
+    )
+    ok, reason = processor._validate_attachment_url("https://example.com/a.png")
+    assert ok is False
+    assert reason == "host_not_allowlisted"
+
+
+def test_attachment_url_validation_blocks_private_ip_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = DummyRuntime()
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+        allowed_attachment_hosts=("cdn.discordapp.com",),
+    )
+
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))
+        ],
+    )
+    ok, reason = processor._validate_attachment_url("https://cdn.discordapp.com/a.png")
+    assert ok is False
+    assert reason == "resolved_to_non_public_ip"

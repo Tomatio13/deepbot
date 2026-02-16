@@ -29,4 +29,17 @@ def normalize_input(text: str) -> str:
     normalized = strip_zero_width(text)
     normalized = fold_fullwidth(normalized)
     normalized = unicodedata.normalize("NFKC", normalized)
+    normalized = "".join(
+        ch
+        for ch in normalized
+        if ch in {"\n", "\r", "\t"} or not unicodedata.category(ch).startswith("C")
+    )
     return normalized
+
+
+def sanitize_for_prompt(text: str) -> str:
+    return "".join(
+        ch
+        for ch in text
+        if ch in {"\n", "\r", "\t"} or not unicodedata.category(ch).startswith("C")
+    )
