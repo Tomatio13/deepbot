@@ -852,6 +852,53 @@ async def test_rerun_last_reply_generates_new_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rerun_last_reply_can_run_multiple_times() -> None:
+    store = SessionStore(max_messages=20, ttl_seconds=300)
+    runtime = SequenceRuntime(
+        responses=[
+            "最初の返信",
+            "再実行1回目",
+            "再実行2回目",
+        ]
+    )
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+    sent: list[tuple[str, UiIntent | None, tuple[str, ...]]] = []
+
+    async def send_reply(
+        text: str,
+        *,
+        ui_intent: UiIntent | None = None,
+        image_urls: tuple[str, ...] = (),
+    ):
+        sent.append((text, ui_intent, image_urls))
+
+    message = MessageEnvelope(
+        message_id="1",
+        content="こんにちは",
+        author_id="u1",
+        author_is_bot=False,
+        guild_id="g1",
+        channel_id="c1",
+        thread_id=None,
+        attachments=(),
+    )
+    session_id = MessageProcessor.build_session_id(message)
+    await processor.handle_message(message, send_reply=send_reply)
+    assert await processor.rerun_last_reply(session_id=session_id, actor_id="u1", send_reply=send_reply) is None
+    assert await processor.rerun_last_reply(session_id=session_id, actor_id="u1", send_reply=send_reply) is None
+
+    assert runtime.calls == 3
+    assert [item[0] for item in sent] == ["最初の返信", "再実行1回目", "再実行2回目"]
+    assert runtime.requests[1].context[-1]["role"] == "user"
+    assert runtime.requests[2].context[-1]["role"] == "user"
+
+
+@pytest.mark.asyncio
 async def test_explain_last_reply_appends_instruction_and_replies() -> None:
     store = SessionStore(max_messages=10, ttl_seconds=300)
     runtime = SequenceRuntime(

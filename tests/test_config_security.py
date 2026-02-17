@@ -74,3 +74,34 @@ def test_config_rejects_relative_shell_deny_prefixes(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(ConfigError, match="SHELL_DENY_PATH_PREFIXES"):
         load_config()
+
+
+def test_config_allows_openai_provider_without_key_when_base_url_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("STRANDS_MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://litellm:4000/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("OPENAI_MODEL_ID", "gpt-4o-mini")
+
+    config = load_config()
+    assert config.strands_model_provider == "openai"
+    assert config.openai_base_url == "http://litellm:4000/v1"
+
+
+def test_config_rejects_openai_provider_without_key_and_without_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("STRANDS_MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("OPENAI_MODEL_ID", "gpt-4o-mini")
+
+    with pytest.raises(ConfigError, match="OPENAI_API_KEY is required"):
+        load_config()

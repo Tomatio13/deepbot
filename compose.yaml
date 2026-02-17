@@ -7,14 +7,17 @@ services:
     container_name: deepbot
     working_dir: /app
     env_file:
-      - .env
+      - .env.deepbot
     environment:
+      OPENAI_BASE_URL: http://litellm:4000/v1
       DEEPBOT_CONFIG_DIR: /app/config
       MCP_CONFIG_PATH: /app/config/mcp.json
       MCP_HOST_GATEWAY: host.docker.internal
       WORKSPACE_DIR: /workspace
       STRANDS_TOOL_CONSOLE_MODE: disable
       BYPASS_TOOL_CONSENT: "true"
+    depends_on:
+      - litellm
     extra_hosts:
       - "host.docker.internal:host-gateway"
     cap_add:
@@ -26,4 +29,20 @@ services:
     volumes:
       - ./config:/app/config:ro
       - ./workspace:/workspace
+    restart: unless-stopped
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: deepbot-litellm
+    env_file:
+      - .env.litellm
+    volumes:
+      - ./config:/app/config:ro
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "4000"
+      - --config
+      - /app/config/litellm.yaml
     restart: unless-stopped

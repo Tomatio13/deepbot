@@ -23,13 +23,16 @@ Strands Agents を使った Discord Bot です。ユーザーの発言に自動�
 - JSON（`markdown`, `ui_intent.buttons`, `images`）による見せ方指定で、ボタンUIと画像Embedを返せる
 
 ## ⚡ 最短スタート（初心者向け）
-1. `.env` を作成
+1. 分割envを作成
 ```bash
-cp .env.example .env
+cp .env.deepbot.example .env.deepbot
+cp .env.litellm.example .env.litellm
 ```
-2. `.env` のこの3つだけ先に設定
+2. 先にこの値を設定
 - `DISCORD_BOT_TOKEN`
-- `OPENAI_API_KEY`
+- `.env.deepbot: OPENAI_API_KEY`（deepbot -> litellm の内部キー）
+- `.env.litellm: LITELLM_MASTER_KEY`（deepbot側と同じ値）
+- `.env.litellm: OPENAI_API_KEY`（上流OpenAIキー）
 - `AUTH_PASSPHRASE`（空のままだと起動エラー）
 3. 起動
 ```bash
@@ -39,6 +42,10 @@ docker compose logs -f deepbot
 ```
 
 ## 🐳 Docker Compose 運用の前提
+- リクエスト経路は `deepbot -> litellm -> OpenAI` です。
+- 秘密情報は `.env.deepbot` と `.env.litellm` に分離します。
+- 上流プロバイダのAPIキーは `.env.litellm` のみに置きます。
+- `config/litellm.yaml` でモデル別のエイリアスを管理します（既定: `gpt-4o-mini`, `glm-4.7`）。
 - コンテナはビルド済みイメージの `/app` コードで動きます（`/app` は bind mount しません）。
 - `./config` は `/app/config` に read-only マウント。
 - `./workspace` は `/workspace` に read-write マウント。
@@ -50,20 +57,52 @@ docker compose build deepbot
 docker compose up -d
 ```
 
-## ⚙️ 設定ガイド（.env）
+### コンテナ構成（認証情報の境界）
+```text
+Discord
+  -> deepbot container
+       env: .env.deepbot
+       key: OPENAI_API_KEY (internal; litellm用)
+  -> litellm container
+       env: .env.litellm
+       keys: LITELLM_MASTER_KEY, OPENAI_API_KEY, GLM_API_KEY
+  -> Provider APIs
+       OpenAI / GLM(OpenAI互換)
+```
+
+### envの責務
+- `.env.deepbot`: Discord Bot実行に必要な設定のみ。上流プロバイダキーは置かない。
+- `.env.litellm`: プロバイダ接続に必要な秘密情報のみ。
+- 共有キー: `.env.deepbot` の `OPENAI_API_KEY` と `.env.litellm` の `LITELLM_MASTER_KEY` は同じ値にする。
+
+## ⚙️ 設定ガイド
 以下は「どこを触ればよいか」が分かるように分類しています。
 
-### 1. 必須（まずここだけ）
+### 1. 必須（`.env.deepbot`）
 - `DISCORD_BOT_TOKEN`: Discord Bot トークン
-- `OPENAI_API_KEY`: OpenAI API キー
+- `OPENAI_API_KEY`: deepbot->litellm 間の内部認証キー
 - `AUTH_PASSPHRASE`: `/auth` 用の合言葉
+- `OPENAI_MODEL_ID`: `config/litellm.yaml` のモデルエイリアス（例: `gpt-4o-mini`, `glm-4.7`）
 
-### 2. 通常はデフォルトでOK
-- `OPENAI_MODEL_ID`: 使用モデル（例: `gpt-4o-mini`）
+### 1.1 必須（`.env.litellm`）
+- `LITELLM_MASTER_KEY`: deepbot -> litellm の内部キー（`.env.deepbot` の `OPENAI_API_KEY` と同じ値）
+- `OPENAI_API_KEY`: 上流OpenAIキー（OpenAIルートを使う場合）
+- `GLM_API_KEY`: `glm-4.7` ルートを使う場合に必須
+
+### 2. 通常はデフォルトでOK（`.env.deepbot`）
 - `SESSION_MAX_TURNS`, `SESSION_TTL_MINUTES`: 会話履歴の保持量/保持時間
 - `BOT_FALLBACK_MESSAGE`: 失敗時の返信文
 - `BOT_PROCESSING_MESSAGE`: 「調べます」等の先行返信
 - `LOG_LEVEL`: ログレベル（通常 `INFO`）
+
+### 2.1 GLM-4.7 を使う場合
+- `.env.litellm` に `GLM_API_KEY` を設定
+- 必要なら `.env.litellm` の `GLM_API_BASE` を調整（既定: `https://open.bigmodel.cn/api/paas/v4`）
+- `.env.deepbot` の `OPENAI_MODEL_ID=glm-4.7` に変更
+- 再起動:
+```bash
+docker compose up -d --build
+```
 
 ### 3. セキュリティ関連（重要）
 - `AUTH_REQUIRED=true`: 認証を必須化（推奨）
@@ -118,3 +157,6 @@ pytest -q
 2. 設定を変えたのに反映されない: `docker compose build deepbot` を実行
 3. ツールが動かない: `DANGEROUS_TOOLS_ENABLED` と `ENABLED_DANGEROUS_TOOLS` を確認
 4. shell が拒否される: `srt --settings ... -c` 形式になっているか確認
+5. `openai.OpenAIError: api_key must be set`: `.env.deepbot` の `OPENAI_API_KEY` が空
+6. `model=... Invalid model name`: `OPENAI_MODEL_ID` と `config/litellm.yaml` のエイリアス不一致
+7. GLM接続できない: `.env.litellm` の変数名は `GLM_API_BASE`（`GLM_BASE_URL` ではない）

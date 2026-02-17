@@ -1,4 +1,7 @@
 .env
+.env.*
+!.env.example
+!.env.*.example
 
 .venv/
 __pycache__/
@@ -9,5 +12,6 @@ __pycache__/
 
 config/*
 !config/AGENT.md
+!config/litellm.yaml
 config/skills/
 workspace/

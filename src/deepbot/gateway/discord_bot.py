@@ -805,7 +805,7 @@ class MessageProcessor:
             return "再実行できる会話履歴がありません。"
 
         rerun_context = [dict(item) for item in context]
-        if rerun_context and rerun_context[-1].get("role") == "assistant":
+        while rerun_context and rerun_context[-1].get("role") == "assistant":
             rerun_context.pop()
         if not rerun_context:
             return "再実行できる会話履歴がありません。"

@@ -23,13 +23,16 @@ Discord bot built with Strands Agents. It replies automatically to user messages
 - Prompt-driven rich replies via JSON (`markdown`, `ui_intent.buttons`, `images`) for buttons and image embeds
 
 ## ⚡ Quick Start (Beginner)
-1. Create `.env`
+1. Create split env files
 ```bash
-cp .env.example .env
+cp .env.deepbot.example .env.deepbot
+cp .env.litellm.example .env.litellm
 ```
-2. Set these 3 values first
+2. Set these values first
 - `DISCORD_BOT_TOKEN`
-- `OPENAI_API_KEY`
+- `.env.deepbot: OPENAI_API_KEY` (internal key for deepbot -> litellm)
+- `.env.litellm: LITELLM_MASTER_KEY` (must match deepbot internal key)
+- `.env.litellm: OPENAI_API_KEY` (upstream OpenAI key)
 - `AUTH_PASSPHRASE` (must not be empty)
 3. Build and run
 ```bash
@@ -39,6 +42,10 @@ docker compose logs -f deepbot
 ```
 
 ## 🐳 Docker Compose Behavior
+- Request flow is `deepbot -> litellm -> OpenAI`.
+- Secrets are split by service: `.env.deepbot` and `.env.litellm`.
+- Upstream provider keys are only in `.env.litellm`.
+- `config/litellm.yaml` defines model aliases. Default aliases: `gpt-4o-mini`, `glm-4.7`.
 - Runs code from built image (`/app` is not bind-mounted).
 - Mounts `./config` to `/app/config` as read-only.
 - Mounts `./workspace` to `/workspace` as read-write.
@@ -50,20 +57,52 @@ docker compose build deepbot
 docker compose up -d
 ```
 
-## ⚙️ Configuration Guide (.env)
-Use this section to understand which values matter first.
+### Container Topology (Secret Boundaries)
+```text
+Discord
+  -> deepbot container
+       env: .env.deepbot
+       key: OPENAI_API_KEY (internal key for litellm)
+  -> litellm container
+       env: .env.litellm
+       keys: LITELLM_MASTER_KEY, OPENAI_API_KEY, GLM_API_KEY
+  -> Provider APIs
+       OpenAI / GLM (OpenAI-compatible endpoint)
+```
 
-### 1. Required
+### Env ownership
+- `.env.deepbot`: only bot runtime settings; do not place upstream provider keys here.
+- `.env.litellm`: provider credentials and litellm routing secrets.
+- Shared internal key: `.env.deepbot` `OPENAI_API_KEY` must equal `.env.litellm` `LITELLM_MASTER_KEY`.
+
+## ⚙️ Configuration Guide
+Use split env files to enforce least privilege.
+
+### 1. Required (`.env.deepbot`)
 - `DISCORD_BOT_TOKEN`: Discord bot token
-- `OPENAI_API_KEY`: OpenAI API key
+- `OPENAI_API_KEY`: internal proxy key between deepbot and litellm
 - `AUTH_PASSPHRASE`: passphrase for `/auth`
+- `OPENAI_MODEL_ID`: model alias in `config/litellm.yaml` (for example `gpt-4o-mini` or `glm-4.7`)
 
-### 2. Usually Keep Defaults
-- `OPENAI_MODEL_ID`
+### 1.1 Required (`.env.litellm`)
+- `LITELLM_MASTER_KEY`: internal key for deepbot -> litellm (must equal `.env.deepbot` `OPENAI_API_KEY`)
+- `OPENAI_API_KEY`: upstream OpenAI key (optional if you only use non-OpenAI routes)
+- `GLM_API_KEY`: required when using `glm-4.7`
+
+### 2. Usually Keep Defaults (`.env.deepbot`)
 - `SESSION_MAX_TURNS`, `SESSION_TTL_MINUTES`
 - `BOT_FALLBACK_MESSAGE`
 - `BOT_PROCESSING_MESSAGE`
 - `LOG_LEVEL`
+
+### 2.1 Use GLM-4.7 via LiteLLM
+- Set `GLM_API_KEY` in `.env.litellm`
+- Keep or adjust `GLM_API_BASE` in `.env.litellm` (default: `https://open.bigmodel.cn/api/paas/v4`)
+- Set `OPENAI_MODEL_ID=glm-4.7` in `.env.deepbot`
+- Restart:
+```bash
+docker compose up -d --build
+```
 
 ### 3. Security Controls (Important)
 - `AUTH_REQUIRED=true`
@@ -119,3 +158,6 @@ pytest -q
 2. Config changes not applied: run `docker compose build deepbot`
 3. Tool unavailable: check `DANGEROUS_TOOLS_ENABLED` and `ENABLED_DANGEROUS_TOOLS`
 4. Shell rejected: use `srt --settings ... -c "<command>"`
+5. `openai.OpenAIError: api_key must be set`: `.env.deepbot` `OPENAI_API_KEY` is empty
+6. `Invalid model name`: `OPENAI_MODEL_ID` does not match an alias in `config/litellm.yaml`
+7. GLM route fails: use `GLM_API_BASE` (not `GLM_BASE_URL`) in `.env.litellm`

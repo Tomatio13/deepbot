@@ -99,8 +99,11 @@ def load_config() -> AppConfig:
 
     provider = os.environ.get("STRANDS_MODEL_PROVIDER", "").strip().lower()
     openai_base_url = os.environ.get("OPENAI_BASE_URL", "").strip() or None
-    if provider == "openai" and not os.environ.get("OPENAI_API_KEY", "").strip():
-        raise ConfigError("OPENAI_API_KEY is required when STRANDS_MODEL_PROVIDER=openai")
+    openai_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if provider == "openai" and not openai_api_key and not openai_base_url:
+        raise ConfigError(
+            "OPENAI_API_KEY is required when STRANDS_MODEL_PROVIDER=openai and OPENAI_BASE_URL is not set"
+        )
 
     try:
         model_config = _parse_json_or_file(os.environ.get("STRANDS_MODEL_CONFIG"))
