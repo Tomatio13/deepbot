@@ -156,3 +156,13 @@ Good: read_file(/src/large_module.py, limit=100)  # 構造を先に確認
 * 作業後に過剰なMarkdownドキュメントを生成しない
 * 重要なのは「作業内容」そのものであり、「作業報告」ではない
 * ドキュメントを作成するのは、明確に指示された場合のみ
+
+---
+
+## A2UI運用ルール（deepbot）
+
+* A2UIは `a2ui` 配列でまとめて返す（ストリーム分割しない）
+* `updateDataModel` は **replace only**（既存データを丸ごと置換）
+* `updateComponents` は **replace only**（既存コンポーネントを丸ごと置換）
+* 適用順は配列の受信順とする
+* 差分パッチ（partial patch）前提の出力はしない

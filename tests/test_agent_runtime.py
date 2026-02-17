@@ -115,3 +115,52 @@ def test_openai_image_formatter_patch_removes_detail_and_format() -> None:
     assert formatted["image_url"]["url"].startswith("data:image/jpeg;base64,")
     assert "detail" not in formatted["image_url"]
     assert "format" not in formatted["image_url"]
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_stream_async_sends_progress_and_result() -> None:
+    class StreamingAgent:
+        def __call__(self, _: str) -> str:
+            return "fallback"
+
+        async def stream_async(self, _: str):
+            yield {"current_tool_use": {"name": "firecrawl_search"}}
+            yield {"data": "途中テキスト"}
+            yield {"result": "最終結果"}
+
+    runtime = AgentRuntime(agent_callable=StreamingAgent(), timeout_seconds=1)
+    progress: list[str] = []
+
+    async def on_progress(text: str) -> None:
+        progress.append(text)
+
+    result = await runtime.generate_reply(
+        AgentRequest(
+            session_id="s1",
+            context=[{"role": "user", "content": "hello"}],
+            progress_callback=on_progress,
+        )
+    )
+
+    assert result == "最終結果"
+    assert progress == ["調査を続けています…（firecrawl_search）"]
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_stream_async_timeout_returns_partial_text() -> None:
+    class SlowStreamingAgent:
+        def __call__(self, _: str) -> str:
+            return "fallback"
+
+        async def stream_async(self, _: str):
+            yield {"data": "途中結果"}
+            await asyncio.sleep(0.2)
+            yield {"result": "完了結果"}
+
+    runtime = AgentRuntime(agent_callable=SlowStreamingAgent(), timeout_seconds=0.05)
+
+    result = await runtime.generate_reply(
+        AgentRequest(session_id="s1", context=[{"role": "user", "content": "hello"}])
+    )
+    assert "途中結果" in result
+    assert "ここまでの結果" in result

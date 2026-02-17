@@ -21,6 +21,10 @@ Discord bot built with Strands Agents. It replies automatically to user messages
 - Skill execution from `config/skills` via `$skill_name` or `/skill_name`
 - Image attachment forwarding (`png/jpeg/gif/webp`) to model input
 - Prompt-driven rich replies via JSON (`markdown`, `ui_intent.buttons`, `images`) for buttons and image embeds
+- A2UI v0.9-style envelopes via JSON (`a2ui`) with Discord Components V2 rendering
+- Sends lightweight progress updates during long tool-based responses
+
+Developer notes for A2UI behavior and renderer constraints are documented in `docs/a2ui.md`.
 
 ## ⚡ Quick Start (Beginner)
 1. Create split env files
@@ -55,6 +59,10 @@ docker compose logs -f deepbot
 ```bash
 docker compose build deepbot
 docker compose up -d
+```
+- Apply `.env.deepbot` changes without code rebuild:
+```bash
+docker compose up -d --force-recreate deepbot
 ```
 
 ### Container Topology (Secret Boundaries)
@@ -155,9 +163,10 @@ pytest -q
 
 ## 📌 Troubleshooting
 1. Startup error: check `AUTH_PASSPHRASE` is not empty
-2. Config changes not applied: run `docker compose build deepbot`
-3. Tool unavailable: check `DANGEROUS_TOOLS_ENABLED` and `ENABLED_DANGEROUS_TOOLS`
-4. Shell rejected: use `srt --settings ... -c "<command>"`
-5. `openai.OpenAIError: api_key must be set`: `.env.deepbot` `OPENAI_API_KEY` is empty
-6. `Invalid model name`: `OPENAI_MODEL_ID` does not match an alias in `config/litellm.yaml`
-7. GLM route fails: use `GLM_API_BASE` (not `GLM_BASE_URL`) in `.env.litellm`
+2. `.env.deepbot` changes not applied: run `docker compose up -d --force-recreate deepbot`
+3. Python code changes not applied: run `docker compose build deepbot && docker compose up -d deepbot`
+4. Tool unavailable: check `DANGEROUS_TOOLS_ENABLED` and `ENABLED_DANGEROUS_TOOLS`
+5. Shell rejected: use `srt --settings ... -c "<command>"`
+6. `openai.OpenAIError: api_key must be set`: `.env.deepbot` `OPENAI_API_KEY` is empty
+7. `Invalid model name`: `OPENAI_MODEL_ID` does not match an alias in `config/litellm.yaml`
+8. GLM route fails: use `GLM_API_BASE` (not `GLM_BASE_URL`) in `.env.litellm`

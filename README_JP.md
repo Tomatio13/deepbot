@@ -21,6 +21,10 @@ Strands Agents を使った Discord Bot です。ユーザーの発言に自動�
 - `config/skills` の Skill を `$skill名` / `/skill名` で実行
 - 画像添付（`png/jpeg/gif/webp`）をモデル入力へ転送
 - JSON（`markdown`, `ui_intent.buttons`, `images`）による見せ方指定で、ボタンUIと画像Embedを返せる
+- A2UI v0.9 形式の JSON（`a2ui`）で Discord Components V2 UI を返せる
+- 長時間のツール実行時に軽量な進捗メッセージを返せる
+
+A2UI の実装仕様・制約は `docs/a2ui.md` を参照してください。
 
 ## ⚡ 最短スタート（初心者向け）
 1. 分割envを作成
@@ -55,6 +59,10 @@ docker compose logs -f deepbot
 ```bash
 docker compose build deepbot
 docker compose up -d
+```
+- `.env.deepbot` のみ変更した場合は再ビルド不要で再作成のみ:
+```bash
+docker compose up -d --force-recreate deepbot
 ```
 
 ### コンテナ構成（認証情報の境界）
@@ -154,9 +162,10 @@ pytest -q
 
 ## 📌 トラブル時の確認
 1. 起動しない: `AUTH_PASSPHRASE` が空でないか確認
-2. 設定を変えたのに反映されない: `docker compose build deepbot` を実行
-3. ツールが動かない: `DANGEROUS_TOOLS_ENABLED` と `ENABLED_DANGEROUS_TOOLS` を確認
-4. shell が拒否される: `srt --settings ... -c` 形式になっているか確認
-5. `openai.OpenAIError: api_key must be set`: `.env.deepbot` の `OPENAI_API_KEY` が空
-6. `model=... Invalid model name`: `OPENAI_MODEL_ID` と `config/litellm.yaml` のエイリアス不一致
-7. GLM接続できない: `.env.litellm` の変数名は `GLM_API_BASE`（`GLM_BASE_URL` ではない）
+2. `.env.deepbot` 変更が反映されない: `docker compose up -d --force-recreate deepbot` を実行
+3. Pythonコード変更が反映されない: `docker compose build deepbot && docker compose up -d deepbot`
+4. ツールが動かない: `DANGEROUS_TOOLS_ENABLED` と `ENABLED_DANGEROUS_TOOLS` を確認
+5. shell が拒否される: `srt --settings ... -c` 形式になっているか確認
+6. `openai.OpenAIError: api_key must be set`: `.env.deepbot` の `OPENAI_API_KEY` が空
+7. `model=... Invalid model name`: `OPENAI_MODEL_ID` と `config/litellm.yaml` のエイリアス不一致
+8. GLM接続できない: `.env.litellm` の変数名は `GLM_API_BASE`（`GLM_BASE_URL` ではない）

@@ -12,8 +12,10 @@ from deepbot.gateway.discord_bot import (
     AttachmentEnvelope,
     AuthConfig,
     ButtonIntent,
+    DeepbotClientFactory,
     MessageEnvelope,
     MessageProcessor,
+    SurfaceDirective,
     UiIntent,
     _to_envelope,
 )
@@ -964,3 +966,307 @@ def test_extracts_markdown_image_urls_without_json() -> None:
     )
     assert structured.markdown.startswith("こちらです")
     assert structured.image_urls == ("https://example.com/a.png", "https://example.com/b.jpg")
+
+
+def test_parses_a2ui_create_surface_into_structured_reply() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = DummyRuntime()
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+
+    structured = processor._structured_reply_from_text(
+        '{"a2ui":[{"type":"createSurface","surfaceId":"main","components":[{"type":"text","markdown":"A2UI本文"},{"type":"button","label":"再実行","style":"primary","action":"rerun"},{"type":"image","url":"https://example.com/a.png"}]}]}'
+    )
+    assert structured.markdown == "A2UI本文"
+    assert structured.ui_intent == UiIntent(
+        buttons=(ButtonIntent(label="再実行", style="primary", action="rerun", url=None, payload=None),)
+    )
+    assert structured.image_urls == ("https://example.com/a.png",)
+    assert len(structured.a2ui_components) == 3
+
+
+def test_ui_intent_url_button_without_action_becomes_link() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = DummyRuntime()
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+
+    structured = processor._structured_reply_from_text(
+        '{"markdown":"ok","ui_intent":{"buttons":[{"label":"Pexels","style":"primary","url":"https://www.pexels.com/"}]}}'
+    )
+    assert structured.ui_intent is not None
+    assert structured.ui_intent.buttons == (
+        ButtonIntent(
+            label="Pexels",
+            style="link",
+            action=None,
+            url="https://www.pexels.com/",
+            payload=None,
+        ),
+    )
+
+
+def test_applies_a2ui_replace_update_and_delete_surface() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = DummyRuntime()
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+
+    first = processor._structured_reply_from_text(
+        '{"a2ui":[{"type":"createSurface","surfaceId":"main","components":[{"type":"text","markdown":"初期"}]}]}'
+    )
+    assert first.markdown == "初期"
+
+    second = processor._structured_reply_from_text(
+        '{"a2ui":[{"type":"updateDataModel","surfaceId":"main","dataModel":{"step":2}},{"type":"updateComponents","surfaceId":"main","components":[{"type":"text","markdown":"更新後"}]}]}'
+    )
+    assert second.markdown == "更新後"
+
+    third = processor._structured_reply_from_text(
+        '{"a2ui":[{"type":"deleteSurface","surfaceId":"main"}],"markdown":"fallback"}'
+    )
+    assert third.markdown == ""
+    assert third.surface_directives[-1] == SurfaceDirective(type="deletesurface", surface_id="main")
+
+
+def test_updatedatamodel_replace_rerenders_components() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = DummyRuntime()
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+
+    first = processor._structured_reply_from_text(
+        '{"a2ui":[{"type":"createSurface","surfaceId":"main","dataModel":{"name":"太郎"},"components":[{"type":"text","markdown":"こんにちは {{name}}"}]}]}',
+        session_id="s1",
+    )
+    assert first.markdown == "こんにちは 太郎"
+
+    second = processor._structured_reply_from_text(
+        '{"a2ui":[{"type":"updateDataModel","surfaceId":"main","dataModel":{"name":"花子"}}]}',
+        session_id="s1",
+    )
+    assert second.markdown == "こんにちは 花子"
+
+
+def test_surface_state_isolated_by_session_id() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = DummyRuntime()
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+
+    processor._structured_reply_from_text(
+        '{"a2ui":[{"type":"createSurface","surfaceId":"main","dataModel":{"name":"セッション1"},"components":[{"type":"text","markdown":"{{name}}"}]}]}',
+        session_id="session-1",
+    )
+    processor._structured_reply_from_text(
+        '{"a2ui":[{"type":"createSurface","surfaceId":"main","dataModel":{"name":"セッション2"},"components":[{"type":"text","markdown":"{{name}}"}]}]}',
+        session_id="session-2",
+    )
+
+    result1 = processor._structured_reply_from_text(
+        '{"a2ui":[{"type":"updateDataModel","surfaceId":"main","dataModel":{"name":"更新1"}}]}',
+        session_id="session-1",
+    )
+    result2 = processor._structured_reply_from_text(
+        '{"a2ui":[{"type":"updateDataModel","surfaceId":"main","dataModel":{"name":"更新2"}}]}',
+        session_id="session-2",
+    )
+
+    assert result1.markdown == "更新1"
+    assert result2.markdown == "更新2"
+
+
+@pytest.mark.asyncio
+async def test_handle_ui_action_generates_reply() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = SequenceRuntime(
+        responses=[
+            "最初の返信",
+            "操作後の返信",
+        ]
+    )
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+    sent: list[tuple[str, UiIntent | None, tuple[str, ...]]] = []
+
+    async def send_reply(
+        text: str,
+        *,
+        ui_intent: UiIntent | None = None,
+        image_urls: tuple[str, ...] = (),
+    ):
+        sent.append((text, ui_intent, image_urls))
+
+    message = MessageEnvelope(
+        message_id="1",
+        content="最初の質問",
+        author_id="u1",
+        author_is_bot=False,
+        guild_id="g1",
+        channel_id="c1",
+        thread_id=None,
+        attachments=(),
+    )
+    session_id = MessageProcessor.build_session_id(message)
+    await processor.handle_message(message, send_reply=send_reply)
+
+    error = await processor.handle_ui_action(
+        session_id=session_id,
+        actor_id="u1",
+        action="custom_action",
+        payload="p1",
+        send_reply=send_reply,
+    )
+    assert error is None
+    assert runtime.calls == 2
+    assert sent[-1][0] == "操作後の返信"
+
+
+@pytest.mark.asyncio
+async def test_build_view_prefers_layout_view_for_a2ui_components() -> None:
+    discord = pytest.importorskip("discord")
+
+    async def on_action(_: Any, __: str, ___: str | None) -> None:
+        return None
+
+    components = (
+        {"type": "text", "markdown": "見出し"},
+        {
+            "type": "section",
+            "components": [
+                {"type": "text", "markdown": "選択してください"},
+                {
+                    "type": "select",
+                    "action": "pick",
+                    "options": [
+                        {"label": "A", "value": "a"},
+                        {"label": "B", "value": "b"},
+                    ],
+                },
+            ],
+        },
+        {"type": "button", "label": "実行", "style": "primary", "action": "run"},
+    )
+    view = DeepbotClientFactory._build_view(
+        discord,
+        ui_intent=None,
+        a2ui_components=components,
+        on_action=on_action,
+    )
+    assert view is not None
+    assert isinstance(view, discord.ui.LayoutView)
+    assert len(view.children) >= 1
+
+
+def test_parses_delete_surface_directive_without_fallback_message() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = DummyRuntime()
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+
+    structured = processor._structured_reply_from_text(
+        '{"a2ui":[{"type":"deleteSurface","surfaceId":"main"}]}',
+        session_id="s1",
+    )
+    assert structured.markdown == ""
+    assert structured.surface_directives == (
+        SurfaceDirective(type="deletesurface", surface_id="main"),
+    )
+
+
+class _FakeSentMessage:
+    def __init__(self, *, content: str | None = None) -> None:
+        self.content = content
+        self.edits: list[tuple[str | None, Any, list[Any]]] = []
+        self.deleted = False
+
+    async def edit(self, *, content: str | None = None, view: Any = None, embeds: list[Any] | None = None) -> None:
+        self.content = content
+        self.edits.append((content, view, list(embeds or [])))
+
+    async def delete(self) -> None:
+        self.deleted = True
+
+
+class _FakeChannel:
+    def __init__(self) -> None:
+        self.sent: list[_FakeSentMessage] = []
+
+    async def send(self, *, content: str | None = None, view: Any = None, embeds: list[Any] | None = None) -> _FakeSentMessage:
+        msg = _FakeSentMessage(content=content)
+        self.sent.append(msg)
+        return msg
+
+
+@pytest.mark.asyncio
+async def test_surface_message_mapping_send_edit_delete() -> None:
+    channel = _FakeChannel()
+    mapping: dict[tuple[str, str], Any] = {}
+    session_id = "s1"
+
+    created = await DeepbotClientFactory._send_or_update_surface_message(
+        channel=channel,
+        session_id=session_id,
+        surface_messages=mapping,
+        directive=SurfaceDirective(type="createsurface", surface_id="main"),
+        content="first",
+        view=None,
+        embeds=[],
+    )
+    assert created is not None
+    assert len(channel.sent) == 1
+    assert ("s1", "main") in mapping
+
+    updated = await DeepbotClientFactory._send_or_update_surface_message(
+        channel=channel,
+        session_id=session_id,
+        surface_messages=mapping,
+        directive=SurfaceDirective(type="updatecomponents", surface_id="main"),
+        content="updated",
+        view=None,
+        embeds=[],
+    )
+    assert updated is created
+    assert len(channel.sent) == 1
+    assert created.edits and created.edits[-1][0] == "updated"
+
+    deleted = await DeepbotClientFactory._send_or_update_surface_message(
+        channel=channel,
+        session_id=session_id,
+        surface_messages=mapping,
+        directive=SurfaceDirective(type="deletesurface", surface_id="main"),
+        content=None,
+        view=None,
+        embeds=[],
+    )
+    assert deleted is None
+    assert created.deleted is True
+    assert ("s1", "main") not in mapping

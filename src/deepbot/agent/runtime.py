@@ -7,7 +7,7 @@ import re
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from deepbot.config import AppConfig, ConfigError, RuntimeSettings
 from deepbot.mcp_tools import load_mcp_tool_providers
@@ -25,6 +25,7 @@ class AgentRequest:
     session_id: str
     context: list[dict[str, str]]
     image_attachments: tuple["ImageAttachment", ...] = ()
+    progress_callback: Callable[[str], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -45,9 +46,9 @@ class AgentRuntime:
         fallback_prompt = self._build_prompt(request)
         async with self._call_lock:
             try:
-                response = await asyncio.wait_for(
-                    asyncio.to_thread(self._agent_callable, model_input),
-                    timeout=self._timeout_seconds,
+                response = await self._run_agent_with_timeout(
+                    model_input=model_input,
+                    request=request,
                 )
             except Exception as exc:
                 if request.image_attachments and self._should_retry_without_images(exc):
@@ -55,13 +56,72 @@ class AgentRuntime:
                         "Image input rejected by model provider. Retrying without images. session_id=%s",
                         request.session_id,
                     )
-                    response = await asyncio.wait_for(
-                        asyncio.to_thread(self._agent_callable, fallback_prompt),
-                        timeout=self._timeout_seconds,
+                    response = await self._run_agent_with_timeout(
+                        model_input=fallback_prompt,
+                        request=request,
                     )
                 else:
                     raise
         return str(response).strip()
+
+    async def _run_agent_with_timeout(self, *, model_input: Any, request: AgentRequest) -> str:
+        stream_async = getattr(self._agent_callable, "stream_async", None)
+        if callable(stream_async):
+            partial: dict[str, Any] = {"text": ""}
+
+            async def _consume_stream() -> str:
+                last_tool_name = ""
+                async for event in stream_async(model_input):
+                    if not isinstance(event, dict):
+                        continue
+                    data = event.get("data")
+                    if isinstance(data, str) and data:
+                        partial["text"] += data
+                    tool_name = self._extract_tool_name(event)
+                    if (
+                        tool_name
+                        and request.progress_callback is not None
+                        and tool_name != last_tool_name
+                    ):
+                        last_tool_name = tool_name
+                        await request.progress_callback(f"調査を続けています…（{tool_name}）")
+                    result = event.get("result")
+                    if result is not None:
+                        text = str(result).strip()
+                        if text:
+                            partial["text"] = text
+                return str(partial["text"]).strip()
+
+            try:
+                return await asyncio.wait_for(_consume_stream(), timeout=self._timeout_seconds)
+            except TimeoutError:
+                text = str(partial["text"]).strip()
+                if text:
+                    return f"{text}\n\n（処理時間の上限に達したため、ここまでの結果を返します）"
+                raise
+
+        return str(
+            await asyncio.wait_for(
+                asyncio.to_thread(self._agent_callable, model_input),
+                timeout=self._timeout_seconds,
+            )
+        )
+
+    @staticmethod
+    def _extract_tool_name(event: dict[str, Any]) -> str:
+        current_tool_use = event.get("current_tool_use")
+        if isinstance(current_tool_use, dict):
+            for key in ("name", "tool_name", "toolName"):
+                value = current_tool_use.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        tool_use = event.get("tool_use")
+        if isinstance(tool_use, dict):
+            for key in ("name", "tool_name", "toolName"):
+                value = tool_use.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
 
     @staticmethod
     def _should_retry_without_images(exc: Exception) -> bool:
@@ -138,14 +198,19 @@ class AgentRuntime:
                 "Reply in Japanese, concise and helpful.",
                 "Use emojis frequently where natural (about 1-3 emojis per short paragraph).",
                 "Use Markdown for normal answers.",
-                "If UI helps, you may return JSON only with this shape:",
+                "If UI helps, you may return JSON only with either shape:",
                 '{"markdown":"<markdown text>","ui_intent":{"buttons":[{"label":"再実行","style":"primary","action":"rerun"}]},"images":["https://..."]}',
+                '{"a2ui":[{"type":"createSurface","surfaceId":"main","components":[{"type":"text","markdown":"<markdown text>"},{"type":"section","components":[{"type":"text","markdown":"項目を選んでください"},{"type":"select","action":"pick","options":[{"label":"A","value":"a"},{"label":"B","value":"b"}]}]},{"type":"button","label":"再実行","style":"primary","action":"rerun"}]}]}',
                 "Rules:",
                 "- markdown: required string when returning JSON",
                 "- ui_intent.buttons: up to 3 buttons",
                 "- button.style: primary|secondary|success|danger|link",
                 "- link style requires url",
                 "- images: optional absolute image URLs (https preferred)",
+                "- a2ui: optional list of envelopes (use when building stateful UI)",
+                "- supported envelope types: createSurface, updateComponents, updateDataModel, deleteSurface",
+                "- supported components (phase2): text, button, select, section, container, separator, thumbnail, media_gallery",
+                "- Discord does not support Markdown tables. Never use table syntax (`| ... |`). Use bullet lists instead.",
                 "- Do not wrap JSON in markdown fences",
             ]
         )
