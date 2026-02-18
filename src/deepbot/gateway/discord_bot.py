@@ -10,7 +10,7 @@ import re
 import socket
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import urlparse
@@ -1343,11 +1343,16 @@ async def _to_envelope(message: Any) -> MessageEnvelope:
     channel = getattr(message, "channel", None)
 
     thread_id = None
-    if channel is not None and hasattr(channel, "id"):
-        # Discord thread channel also has id; for MVP, use message.thread when available.
+    raw_thread_id = getattr(message, "thread_id", None)
+    if raw_thread_id is not None:
+        thread_id = str(raw_thread_id)
+    elif channel is not None and hasattr(channel, "id"):
+        # For some payloads `message.thread` is missing even when channel itself is a thread.
         thread = getattr(message, "thread", None)
         if thread is not None and hasattr(thread, "id"):
             thread_id = str(thread.id)
+        elif getattr(channel, "parent_id", None) is not None:
+            thread_id = str(channel.id)
 
     author = message.author
     attachment_items: list[AttachmentEnvelope] = []
@@ -1407,6 +1412,182 @@ class DeepbotClientFactory:
         "select",
         "string_select",
     }
+    _THREAD_TITLE_BLOCK_PATTERNS = (
+        re.compile(r"^\s*[-*]\s*"),
+        re.compile(r"^\s*\d+[.)]\s*"),
+        re.compile(r"^\s*#+\s*"),
+        re.compile(r"^\s*>+\s*"),
+        re.compile(r"^\s*`+"),
+    )
+
+    @staticmethod
+    def _should_auto_thread_for_message(
+        envelope: MessageEnvelope,
+        *,
+        enabled: bool,
+        mode: str,
+        channel_ids: tuple[str, ...],
+        trigger_keywords: tuple[str, ...],
+    ) -> bool:
+        if not enabled:
+            return False
+        if envelope.author_is_bot:
+            return False
+        if envelope.guild_id is None:
+            return False
+        if envelope.thread_id is not None:
+            return False
+        if channel_ids and envelope.channel_id not in channel_ids:
+            return False
+        if mode == "channel":
+            return bool(channel_ids)
+        normalized = envelope.content.strip().lower()
+        if not normalized:
+            return False
+        return any(keyword in normalized for keyword in trigger_keywords if keyword)
+
+    @staticmethod
+    def _auto_thread_name(message: Any) -> str:
+        display_name = str(getattr(getattr(message, "author", None), "display_name", "")).strip()
+        if not display_name:
+            display_name = "thread"
+        base = f"{display_name}-{getattr(message, 'id', '')}"
+        return base[:95] if len(base) > 95 else base
+
+    @staticmethod
+    def _resolve_thread_for_rename(
+        *,
+        auto_thread: Any | None,
+        reply_channel: Any,
+        envelope: MessageEnvelope,
+    ) -> Any | None:
+        if auto_thread is not None:
+            return auto_thread
+        if envelope.thread_id is None:
+            return None
+        reply_channel_id = str(getattr(reply_channel, "id", "") or "").strip()
+        if (
+            reply_channel_id
+            and reply_channel_id == envelope.thread_id
+            and hasattr(reply_channel, "edit")
+        ):
+            return reply_channel
+        return None
+
+    @staticmethod
+    def _build_thread_title_from_reply(text: str, *, fallback: str = "thread") -> str:
+        raw = text.strip()
+        if not raw:
+            return fallback[:95]
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        if not lines:
+            return fallback[:95]
+        line = lines[0]
+        for pattern in DeepbotClientFactory._THREAD_TITLE_BLOCK_PATTERNS:
+            line = pattern.sub("", line).strip()
+        line = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
+        line = re.sub(r"__(.*?)__", r"\1", line)
+        line = re.sub(r"`([^`]+)`", r"\1", line)
+        line = re.sub(r"\[(.*?)\]\((.*?)\)", r"\1", line)
+        sentence = re.split(r"[。.!?\n]", line, maxsplit=1)[0].strip()
+        candidate = sentence or line or fallback
+        if len(candidate) > 95:
+            candidate = candidate[:95].rstrip()
+        return candidate or fallback[:95]
+
+    @staticmethod
+    def _should_use_reply_for_thread_title(
+        text: str,
+        *,
+        processing_message: str | None = None,
+        fallback_message: str | None = None,
+    ) -> bool:
+        body = text.strip()
+        if not body:
+            return False
+        if processing_message and body == processing_message.strip():
+            return False
+        if fallback_message and body == fallback_message.strip():
+            return False
+        if body.startswith("調査を続けています"):
+            return False
+        if body.startswith("続行するには") and "/auth" in body:
+            return False
+        if body.startswith("認証に成功しました。"):
+            return False
+        if body.startswith("認証に失敗しました。"):
+            return False
+        if body.startswith("このセッションは一時ロック中です。"):
+            return False
+        return True
+
+    @staticmethod
+    async def _maybe_rename_thread_from_reply(
+        *,
+        thread: Any | None,
+        text: str,
+        renamed_threads: set[str],
+        enabled: bool,
+        processing_message: str | None = None,
+        fallback_message: str | None = None,
+    ) -> None:
+        if not enabled or thread is None:
+            return
+        thread_id = str(getattr(thread, "id", "") or "").strip()
+        if not thread_id or thread_id in renamed_threads:
+            return
+        if not DeepbotClientFactory._should_use_reply_for_thread_title(
+            text,
+            processing_message=processing_message,
+            fallback_message=fallback_message,
+        ):
+            return
+        fallback_name = str(getattr(thread, "name", "thread") or "thread")
+        new_name = DeepbotClientFactory._build_thread_title_from_reply(
+            text,
+            fallback=fallback_name,
+        )
+        if new_name == fallback_name:
+            renamed_threads.add(thread_id)
+            return
+        try:
+            await thread.edit(name=new_name)
+            renamed_threads.add(thread_id)
+        except Exception as exc:
+            logger.warning("Auto thread rename failed. thread_id=%s (%s)", thread_id, exc)
+
+    @staticmethod
+    async def _maybe_start_auto_thread(
+        message: Any,
+        envelope: MessageEnvelope,
+        *,
+        enabled: bool,
+        mode: str,
+        channel_ids: tuple[str, ...],
+        trigger_keywords: tuple[str, ...],
+        archive_minutes: int,
+    ) -> Any | None:
+        if not DeepbotClientFactory._should_auto_thread_for_message(
+            envelope,
+            enabled=enabled,
+            mode=mode,
+            channel_ids=channel_ids,
+            trigger_keywords=trigger_keywords,
+        ):
+            return None
+        try:
+            return await message.create_thread(
+                name=DeepbotClientFactory._auto_thread_name(message),
+                auto_archive_duration=archive_minutes,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Auto thread creation failed. channel_id=%s message_id=%s (%s)",
+                envelope.channel_id,
+                envelope.message_id,
+                exc,
+            )
+            return None
 
     @staticmethod
     def _button_style(discord_module: Any, name: str) -> Any:
@@ -1822,7 +2003,16 @@ class DeepbotClientFactory:
         await interaction.response.send_message(text, ephemeral=True)
 
     @staticmethod
-    def create(*, processor: MessageProcessor):
+    def create(
+        *,
+        processor: MessageProcessor,
+        auto_thread_enabled: bool = False,
+        auto_thread_mode: str = "keyword",
+        auto_thread_channel_ids: tuple[str, ...] = (),
+        auto_thread_trigger_keywords: tuple[str, ...] = (),
+        auto_thread_archive_minutes: int = 1440,
+        auto_thread_rename_from_reply: bool = True,
+    ):
         import discord
 
         intents = discord.Intents.default()
@@ -1836,10 +2026,33 @@ class DeepbotClientFactory:
 
             async def on_message(self, message: Any) -> None:
                 envelope = await _to_envelope(message)
+                auto_thread = await DeepbotClientFactory._maybe_start_auto_thread(
+                    message,
+                    envelope,
+                    enabled=auto_thread_enabled,
+                    mode=auto_thread_mode,
+                    channel_ids=auto_thread_channel_ids,
+                    trigger_keywords=auto_thread_trigger_keywords,
+                    archive_minutes=auto_thread_archive_minutes,
+                )
+                reply_channel = auto_thread or message.channel
+                if auto_thread is not None and envelope.thread_id is None:
+                    thread_id = str(getattr(auto_thread, "id", "") or "").strip()
+                    if thread_id:
+                        envelope = replace(envelope, thread_id=thread_id)
+                thread_for_rename = DeepbotClientFactory._resolve_thread_for_rename(
+                    auto_thread=auto_thread,
+                    reply_channel=reply_channel,
+                    envelope=envelope,
+                )
                 session_id = MessageProcessor.build_session_id(envelope)
                 owner_user_id = envelope.author_id
                 surface_messages: dict[tuple[str, str], Any] = getattr(self, "_surface_messages", {})
                 setattr(self, "_surface_messages", surface_messages)
+                renamed_threads: set[str] = getattr(self, "_renamed_threads", set())
+                setattr(self, "_renamed_threads", renamed_threads)
+                processing_message = processor._processing_message
+                fallback_message = processor._fallback_message
 
                 async def _send_channel_reply(
                     text: str,
@@ -1862,8 +2075,8 @@ class DeepbotClientFactory:
                         content = None
                     surface_directive = DeepbotClientFactory._last_surface_directive(surface_directives)
                     if surface_directive is not None:
-                        return await DeepbotClientFactory._send_or_update_surface_message(
-                            channel=message.channel,
+                        sent = await DeepbotClientFactory._send_or_update_surface_message(
+                            channel=reply_channel,
                             session_id=session_id,
                             surface_messages=surface_messages,
                             directive=surface_directive,
@@ -1871,9 +2084,28 @@ class DeepbotClientFactory:
                             view=view,
                             embeds=embeds,
                         )
+                        if sent is not None:
+                            await DeepbotClientFactory._maybe_rename_thread_from_reply(
+                                thread=thread_for_rename,
+                                text=text,
+                                renamed_threads=renamed_threads,
+                                enabled=auto_thread_rename_from_reply,
+                                processing_message=processing_message,
+                                fallback_message=fallback_message,
+                            )
+                        return sent
                     if content is None and not embeds and view is None:
                         content = " "
-                    return await message.channel.send(content=content, view=view, embeds=embeds)
+                    sent = await reply_channel.send(content=content, view=view, embeds=embeds)
+                    await DeepbotClientFactory._maybe_rename_thread_from_reply(
+                        thread=thread_for_rename,
+                        text=text,
+                        renamed_threads=renamed_threads,
+                        enabled=auto_thread_rename_from_reply,
+                        processing_message=processing_message,
+                        fallback_message=fallback_message,
+                    )
+                    return sent
 
                 async def _on_button_action(interaction: Any, action: str, payload: str | None) -> None:
                     actor_id = str(getattr(getattr(interaction, "user", None), "id", "") or "")

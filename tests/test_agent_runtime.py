@@ -117,6 +117,18 @@ def test_openai_image_formatter_patch_removes_detail_and_format() -> None:
     assert "format" not in formatted["image_url"]
 
 
+def test_openai_image_formatter_patch_normalizes_empty_text_block() -> None:
+    class DummyOpenAIModel:
+        @classmethod
+        def format_request_message_content(cls, content, **kwargs):
+            return {"type": "text", "text": ""}
+
+    _patch_openai_image_content_formatter(DummyOpenAIModel)
+    formatted = DummyOpenAIModel.format_request_message_content({"text": ""})
+    assert formatted["type"] == "text"
+    assert formatted["text"] == " "
+
+
 @pytest.mark.asyncio
 async def test_agent_runtime_stream_async_sends_progress_and_result() -> None:
     class StreamingAgent:

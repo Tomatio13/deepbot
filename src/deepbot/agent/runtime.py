@@ -230,6 +230,11 @@ def _patch_openai_image_content_formatter(model_cls: type[Any]) -> None:
 
     def patched(cls: type[Any], content: Any, **kwargs: Any) -> dict[str, Any]:
         formatted = original_func(cls, content, **kwargs)
+        if isinstance(formatted, dict) and formatted.get("type") == "text":
+            text = formatted.get("text")
+            if isinstance(text, str) and not text.strip():
+                # Some OpenAI-compatible providers reject empty text blocks.
+                formatted["text"] = " "
         if isinstance(formatted, dict) and formatted.get("type") == "image_url":
             image_url = formatted.get("image_url")
             if isinstance(image_url, dict):

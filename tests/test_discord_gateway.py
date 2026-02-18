@@ -652,6 +652,23 @@ async def test_to_envelope_includes_attachment_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_to_envelope_uses_thread_channel_id_when_message_thread_missing() -> None:
+    message = SimpleNamespace(
+        id=1,
+        content="thread message",
+        author=SimpleNamespace(id=10, bot=False),
+        guild=SimpleNamespace(id=20),
+        channel=SimpleNamespace(id=31, parent_id=30),
+        thread=None,
+        thread_id=None,
+        attachments=[],
+    )
+
+    envelope = await _to_envelope(message)
+    assert envelope.thread_id == "31"
+
+
+@pytest.mark.asyncio
 async def test_long_reply_is_split_to_fit_discord_limit() -> None:
     store = SessionStore(max_messages=10, ttl_seconds=300)
     runtime = LongReplyRuntime(size=4500)
@@ -1270,3 +1287,277 @@ async def test_surface_message_mapping_send_edit_delete() -> None:
     assert deleted is None
     assert created.deleted is True
     assert ("s1", "main") not in mapping
+
+
+def test_should_auto_thread_for_message() -> None:
+    envelope = MessageEnvelope(
+        message_id="1",
+        content="hello",
+        author_id="u1",
+        author_is_bot=False,
+        guild_id="g1",
+        channel_id="c1",
+        thread_id=None,
+        attachments=(),
+    )
+    assert (
+        DeepbotClientFactory._should_auto_thread_for_message(
+            envelope,
+            enabled=True,
+            mode="channel",
+            channel_ids=("c1",),
+            trigger_keywords=(),
+        )
+        is True
+    )
+
+
+def test_should_auto_thread_for_message_keyword_mode() -> None:
+    envelope = MessageEnvelope(
+        message_id="1",
+        content="この件スレッド立ててください",
+        author_id="u1",
+        author_is_bot=False,
+        guild_id="g1",
+        channel_id="c1",
+        thread_id=None,
+        attachments=(),
+    )
+    assert (
+        DeepbotClientFactory._should_auto_thread_for_message(
+            envelope,
+            enabled=True,
+            mode="keyword",
+            channel_ids=(),
+            trigger_keywords=("スレッド立てて",),
+        )
+        is True
+    )
+
+
+def test_build_thread_title_from_reply() -> None:
+    title = DeepbotClientFactory._build_thread_title_from_reply(
+        "## 重大脆弱性まとめ\n- CVE-2026-25253: ...",
+        fallback="thread",
+    )
+    assert title == "重大脆弱性まとめ"
+
+
+def test_should_use_reply_for_thread_title_filters_processing_like_text() -> None:
+    assert (
+        DeepbotClientFactory._should_use_reply_for_thread_title(
+            "お調べしますね。少しお待ちください。",
+            processing_message="お調べしますね。少しお待ちください。",
+        )
+        is False
+    )
+    assert (
+        DeepbotClientFactory._should_use_reply_for_thread_title(
+            "調査を続けています…（firecrawl_search）",
+            processing_message="お調べしますね。少しお待ちください。",
+        )
+        is False
+    )
+    assert (
+        DeepbotClientFactory._should_use_reply_for_thread_title(
+            "小田原で食べられるお店をまとめました。",
+            processing_message="お調べしますね。少しお待ちください。",
+            fallback_message="Thinking..",
+        )
+        is True
+    )
+    assert (
+        DeepbotClientFactory._should_use_reply_for_thread_title(
+            "Thinking..",
+            processing_message="お調べしますね。少しお待ちください。",
+            fallback_message="Thinking..",
+        )
+        is False
+    )
+
+
+def test_should_use_reply_for_thread_title_filters_auth_messages() -> None:
+    assert (
+        DeepbotClientFactory._should_use_reply_for_thread_title(
+            "続行するには `/auth <合言葉>` を入力してください。",
+            processing_message="お調べしますね。少しお待ちください。",
+        )
+        is False
+    )
+    assert (
+        DeepbotClientFactory._should_use_reply_for_thread_title(
+            "認証に成功しました。20分の間、会話を継続できます。",
+            processing_message="お調べしますね。少しお待ちください。",
+        )
+        is False
+    )
+
+
+def test_resolve_thread_for_rename_uses_reply_channel_in_existing_thread() -> None:
+    class _ReplyChannel:
+        id = "t1"
+
+        async def edit(self, **_: Any) -> None:
+            return None
+
+    envelope = MessageEnvelope(
+        message_id="1",
+        content="hello",
+        author_id="u1",
+        author_is_bot=False,
+        guild_id="g1",
+        channel_id="c1",
+        thread_id="t1",
+        attachments=(),
+    )
+    resolved = DeepbotClientFactory._resolve_thread_for_rename(
+        auto_thread=None,
+        reply_channel=_ReplyChannel(),
+        envelope=envelope,
+    )
+    assert resolved is not None
+    assert getattr(resolved, "id", None) == "t1"
+
+
+def test_resolve_thread_for_rename_returns_none_for_non_thread_channel() -> None:
+    class _ReplyChannel:
+        id = "c1"
+
+        async def edit(self, **_: Any) -> None:
+            return None
+
+    envelope = MessageEnvelope(
+        message_id="1",
+        content="hello",
+        author_id="u1",
+        author_is_bot=False,
+        guild_id="g1",
+        channel_id="c1",
+        thread_id="t1",
+        attachments=(),
+    )
+    resolved = DeepbotClientFactory._resolve_thread_for_rename(
+        auto_thread=None,
+        reply_channel=_ReplyChannel(),
+        envelope=envelope,
+    )
+    assert resolved is None
+
+
+def test_should_auto_thread_for_message_rejects_non_target_cases() -> None:
+    assert (
+        DeepbotClientFactory._should_auto_thread_for_message(
+            MessageEnvelope(
+                message_id="1",
+                content="hello",
+                author_id="u1",
+                author_is_bot=True,
+                guild_id="g1",
+                channel_id="c1",
+                thread_id=None,
+                attachments=(),
+            ),
+            enabled=True,
+            mode="channel",
+            channel_ids=("c1",),
+            trigger_keywords=(),
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_maybe_start_auto_thread_returns_created_thread() -> None:
+    class _Author:
+        display_name = "u1"
+
+    class _Thread:
+        id = 999
+
+    class _Message:
+        id = 123
+        author = _Author()
+
+        async def create_thread(self, *, name: str, auto_archive_duration: int):
+            assert name.startswith("u1-")
+            assert auto_archive_duration == 1440
+            return _Thread()
+
+    envelope = MessageEnvelope(
+        message_id="1",
+        content="hello",
+        author_id="u1",
+        author_is_bot=False,
+        guild_id="g1",
+        channel_id="c1",
+        thread_id=None,
+        attachments=(),
+    )
+    created = await DeepbotClientFactory._maybe_start_auto_thread(
+        _Message(),
+        envelope,
+        enabled=True,
+        mode="channel",
+        channel_ids=("c1",),
+        trigger_keywords=(),
+        archive_minutes=1440,
+    )
+    assert created is not None
+    assert getattr(created, "id", None) == 999
+    assert (
+        DeepbotClientFactory._should_auto_thread_for_message(
+            MessageEnvelope(
+                message_id="1",
+                content="hello",
+                author_id="u1",
+                author_is_bot=False,
+                guild_id=None,
+                channel_id="c1",
+                thread_id=None,
+                attachments=(),
+            ),
+            enabled=True,
+            mode="channel",
+            channel_ids=("c1",),
+            trigger_keywords=(),
+        )
+        is False
+    )
+    assert (
+        DeepbotClientFactory._should_auto_thread_for_message(
+            MessageEnvelope(
+                message_id="1",
+                content="hello",
+                author_id="u1",
+                author_is_bot=False,
+                guild_id="g1",
+                channel_id="c1",
+                thread_id="t1",
+                attachments=(),
+            ),
+            enabled=True,
+            mode="channel",
+            channel_ids=("c1",),
+            trigger_keywords=(),
+        )
+        is False
+    )
+    assert (
+        DeepbotClientFactory._should_auto_thread_for_message(
+            MessageEnvelope(
+                message_id="1",
+                content="hello",
+                author_id="u1",
+                author_is_bot=False,
+                guild_id="g1",
+                channel_id="c2",
+                thread_id=None,
+                attachments=(),
+            ),
+            enabled=True,
+            mode="channel",
+            channel_ids=("c1",),
+            trigger_keywords=(),
+        )
+        is False
+    )

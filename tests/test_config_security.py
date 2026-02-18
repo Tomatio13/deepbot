@@ -105,3 +105,45 @@ def test_config_rejects_openai_provider_without_key_and_without_base_url(
 
     with pytest.raises(ConfigError, match="OPENAI_API_KEY is required"):
         load_config()
+
+
+def test_config_parses_auto_thread_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("AUTO_THREAD_ENABLED", "true")
+    monkeypatch.setenv("AUTO_THREAD_MODE", "keyword")
+    monkeypatch.setenv("AUTO_THREAD_CHANNEL_IDS", "12345,67890")
+    monkeypatch.setenv("AUTO_THREAD_TRIGGER_KEYWORDS", "スレッド立てて,/thread")
+    monkeypatch.setenv("AUTO_THREAD_ARCHIVE_MINUTES", "1440")
+    monkeypatch.setenv("AUTO_THREAD_RENAME_FROM_REPLY", "true")
+
+    config = load_config()
+    assert config.auto_thread_enabled is True
+    assert config.auto_thread_mode == "keyword"
+    assert config.auto_thread_channel_ids == ("12345", "67890")
+    assert config.auto_thread_trigger_keywords == ("スレッド立てて", "/thread")
+    assert config.auto_thread_archive_minutes == 1440
+    assert config.auto_thread_rename_from_reply is True
+
+
+def test_config_rejects_non_positive_auto_thread_archive_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("AUTO_THREAD_ARCHIVE_MINUTES", "0")
+
+    with pytest.raises(ConfigError, match="AUTO_THREAD_ARCHIVE_MINUTES must be > 0"):
+        load_config()
+
+
+def test_config_rejects_invalid_auto_thread_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("AUTO_THREAD_MODE", "invalid")
+
+    with pytest.raises(ConfigError, match="AUTO_THREAD_MODE must be one of"):
+        load_config()

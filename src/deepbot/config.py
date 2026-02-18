@@ -26,6 +26,12 @@ class AppConfig:
     session_max_turns: int
     session_ttl_minutes: int
     auto_reply_all: bool
+    auto_thread_enabled: bool
+    auto_thread_mode: str
+    auto_thread_channel_ids: tuple[str, ...]
+    auto_thread_trigger_keywords: tuple[str, ...]
+    auto_thread_archive_minutes: int
+    auto_thread_rename_from_reply: bool
     agent_timeout_seconds: int
     bot_fallback_message: str
     bot_processing_message: str
@@ -123,12 +129,15 @@ def load_config() -> AppConfig:
 
     session_max_turns = int(os.environ.get("SESSION_MAX_TURNS", "10"))
     session_ttl_minutes = int(os.environ.get("SESSION_TTL_MINUTES", "30"))
+    auto_thread_archive_minutes = int(os.environ.get("AUTO_THREAD_ARCHIVE_MINUTES", "1440"))
     agent_timeout_seconds = int(os.environ.get("AGENT_TIMEOUT_SECONDS", "45"))
 
     if session_max_turns <= 0:
         raise ConfigError("SESSION_MAX_TURNS must be > 0")
     if session_ttl_minutes <= 0:
         raise ConfigError("SESSION_TTL_MINUTES must be > 0")
+    if auto_thread_archive_minutes <= 0:
+        raise ConfigError("AUTO_THREAD_ARCHIVE_MINUTES must be > 0")
     if agent_timeout_seconds <= 0:
         raise ConfigError("AGENT_TIMEOUT_SECONDS must be > 0")
     if provider == "openai" and not str(model_config.get("model_id", "")).strip():
@@ -138,6 +147,7 @@ def load_config() -> AppConfig:
         )
 
     auth_passphrase = os.environ.get("AUTH_PASSPHRASE", "").strip()
+    auto_thread_mode = os.environ.get("AUTO_THREAD_MODE", "keyword").strip().lower() or "keyword"
     enabled_dangerous_tools = _parse_csv(
         os.environ.get("ENABLED_DANGEROUS_TOOLS", "shell,file_read")
     )
@@ -161,6 +171,8 @@ def load_config() -> AppConfig:
 
     if auth_idle_timeout_minutes <= 0:
         raise ConfigError("AUTH_IDLE_TIMEOUT_MINUTES must be > 0")
+    if auto_thread_mode not in {"keyword", "channel"}:
+        raise ConfigError("AUTO_THREAD_MODE must be one of: keyword, channel")
     supported_dangerous_tools = {"file_read", "file_write", "editor", "environment", "shell"}
     invalid_dangerous_tools = [name for name in enabled_dangerous_tools if name not in supported_dangerous_tools]
     if invalid_dangerous_tools:
@@ -217,6 +229,20 @@ def load_config() -> AppConfig:
         session_max_turns=session_max_turns,
         session_ttl_minutes=session_ttl_minutes,
         auto_reply_all=_parse_bool(os.environ.get("AUTO_REPLY_ALL"), default=True),
+        auto_thread_enabled=_parse_bool(os.environ.get("AUTO_THREAD_ENABLED"), default=False),
+        auto_thread_mode=auto_thread_mode,
+        auto_thread_channel_ids=_parse_csv(os.environ.get("AUTO_THREAD_CHANNEL_IDS", "")),
+        auto_thread_trigger_keywords=_parse_csv(
+            os.environ.get(
+                "AUTO_THREAD_TRIGGER_KEYWORDS",
+                "スレッド立てて,/thread,thread please",
+            )
+        ),
+        auto_thread_archive_minutes=auto_thread_archive_minutes,
+        auto_thread_rename_from_reply=_parse_bool(
+            os.environ.get("AUTO_THREAD_RENAME_FROM_REPLY"),
+            default=True,
+        ),
         agent_timeout_seconds=agent_timeout_seconds,
         bot_fallback_message=os.environ.get(
             "BOT_FALLBACK_MESSAGE",

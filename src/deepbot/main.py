@@ -50,7 +50,15 @@ def main() -> None:
         ),
         allowed_attachment_hosts=config.attachment_allowed_hosts,
     )
-    client = DeepbotClientFactory.create(processor=processor)
+    client = DeepbotClientFactory.create(
+        processor=processor,
+        auto_thread_enabled=config.auto_thread_enabled,
+        auto_thread_mode=config.auto_thread_mode,
+        auto_thread_channel_ids=config.auto_thread_channel_ids,
+        auto_thread_trigger_keywords=config.auto_thread_trigger_keywords,
+        auto_thread_archive_minutes=config.auto_thread_archive_minutes,
+        auto_thread_rename_from_reply=config.auto_thread_rename_from_reply,
+    )
 
     logger.info("Starting Deepbot (auto_reply_all=%s)", config.auto_reply_all)
     client.run(config.discord_bot_token)

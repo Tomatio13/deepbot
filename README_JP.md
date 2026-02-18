@@ -99,6 +99,8 @@ Discord
 
 ### 2. 通常はデフォルトでOK（`.env.deepbot`）
 - `SESSION_MAX_TURNS`, `SESSION_TTL_MINUTES`: 会話履歴の保持量/保持時間
+- `AUTO_THREAD_ENABLED`, `AUTO_THREAD_MODE`, `AUTO_THREAD_TRIGGER_KEYWORDS`: 自動スレッド作成の有効化/モード/トリガー語
+- `AUTO_THREAD_CHANNEL_IDS`, `AUTO_THREAD_ARCHIVE_MINUTES`, `AUTO_THREAD_RENAME_FROM_REPLY`: 対象チャンネル絞り込み/自動アーカイブ時間/初回返信由来のタイトル更新
 - `BOT_FALLBACK_MESSAGE`: 失敗時の返信文
 - `BOT_PROCESSING_MESSAGE`: 「調べます」等の先行返信
 - `LOG_LEVEL`: ログレベル（通常 `INFO`）
