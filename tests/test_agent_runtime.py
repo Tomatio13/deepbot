@@ -159,6 +159,50 @@ async def test_agent_runtime_stream_async_sends_progress_and_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_runtime_stream_async_emits_tool_events() -> None:
+    class StreamingAgent:
+        def __call__(self, _: str) -> str:
+            return "fallback"
+
+        async def stream_async(self, _: str):
+            yield {
+                "current_tool_use": {
+                    "name": "file_read",
+                    "toolUseId": "call-1",
+                    "input": {"path": "/workspace/a.txt"},
+                }
+            }
+            yield {
+                "tool_result": {
+                    "toolUseId": "call-1",
+                    "output": {"ok": True, "content": "hello"},
+                }
+            }
+            yield {"result": "done"}
+
+    runtime = AgentRuntime(agent_callable=StreamingAgent(), timeout_seconds=1)
+    events: list[dict[str, object]] = []
+
+    async def on_tool_event(item: dict[str, object]) -> None:
+        events.append(item)
+
+    result = await runtime.generate_reply(
+        AgentRequest(
+            session_id="s1",
+            context=[{"role": "user", "content": "hello"}],
+            tool_event_callback=on_tool_event,
+        )
+    )
+
+    assert result == "done"
+    assert events[0]["phase"] == "start"
+    assert events[0]["call_id"] == "call-1"
+    assert events[0]["name"] == "file_read"
+    assert events[1]["phase"] == "end"
+    assert events[1]["call_id"] == "call-1"
+
+
+@pytest.mark.asyncio
 async def test_agent_runtime_stream_async_timeout_returns_partial_text() -> None:
     class SlowStreamingAgent:
         def __call__(self, _: str) -> str:

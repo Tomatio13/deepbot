@@ -26,6 +26,7 @@ class AgentRequest:
     context: list[dict[str, str]]
     image_attachments: tuple["ImageAttachment", ...] = ()
     progress_callback: Callable[[str], Awaitable[None]] | None = None
+    tool_event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,9 @@ class AgentRuntime:
                 async for event in stream_async(model_input):
                     if not isinstance(event, dict):
                         continue
+                    tool_event = self._extract_tool_event(event)
+                    if tool_event is not None and request.tool_event_callback is not None:
+                        await request.tool_event_callback(tool_event)
                     data = event.get("data")
                     if isinstance(data, str) and data:
                         partial["text"] += data
@@ -122,6 +126,69 @@ class AgentRuntime:
                 if isinstance(value, str) and value.strip():
                     return value.strip()
         return ""
+
+    @staticmethod
+    def _extract_tool_event(event: dict[str, Any]) -> dict[str, Any] | None:
+        for key in ("current_tool_use", "tool_use"):
+            tool_use = event.get(key)
+            if not isinstance(tool_use, dict):
+                continue
+            name = str(
+                tool_use.get("name")
+                or tool_use.get("tool_name")
+                or tool_use.get("toolName")
+                or ""
+            ).strip()
+            if not name:
+                continue
+            call_id = str(
+                tool_use.get("call_id")
+                or tool_use.get("id")
+                or tool_use.get("toolUseId")
+                or ""
+            ).strip() or f"{name}:{id(tool_use)}"
+            arguments: Any = (
+                tool_use.get("arguments")
+                if "arguments" in tool_use
+                else tool_use.get("input")
+            )
+            return {
+                "phase": "start",
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments if arguments is not None else {},
+            }
+
+        for key in ("current_tool_result", "tool_result"):
+            tool_result = event.get(key)
+            if not isinstance(tool_result, dict):
+                continue
+            call_id = str(
+                tool_result.get("call_id")
+                or tool_result.get("id")
+                or tool_result.get("toolUseId")
+                or ""
+            ).strip()
+            if not call_id:
+                continue
+            output: Any = (
+                tool_result.get("output")
+                if "output" in tool_result
+                else tool_result.get("content")
+            )
+            name = str(
+                tool_result.get("name")
+                or tool_result.get("tool_name")
+                or tool_result.get("toolName")
+                or ""
+            ).strip()
+            return {
+                "phase": "end",
+                "call_id": call_id,
+                "name": name or None,
+                "output": output if output is not None else tool_result,
+            }
+        return None
 
     @staticmethod
     def _should_retry_without_images(exc: Exception) -> bool:

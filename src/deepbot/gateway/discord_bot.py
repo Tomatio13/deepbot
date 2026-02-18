@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import urlparse
 
 from deepbot.agent.runtime import AgentRequest, AgentRuntime, ImageAttachment
+from deepbot.audit_log import AuditLogger, create_audit_logger
 from deepbot.memory.session_store import SessionStore
 from deepbot.security import DefenderSettings, PromptInjectionDefender
 
@@ -148,6 +149,7 @@ class MessageProcessor:
         image_loader: Callable[[tuple[AttachmentEnvelope, ...]], Awaitable[list[ImageAttachment]]] | None = None,
         defender: PromptInjectionDefender | None = None,
         allowed_attachment_hosts: tuple[str, ...] | None = None,
+        audit_logger: AuditLogger | None = None,
     ) -> None:
         self._store = store
         self._runtime = runtime
@@ -171,6 +173,18 @@ class MessageProcessor:
         self._auth_states: dict[str, _AuthSessionState] = {}
         self._surface_states: dict[tuple[str, str], _SurfaceState] = {}
         self._auth_lock = asyncio.Lock()
+        self._audit_logger = audit_logger if audit_logger is not None else create_audit_logger()
+
+    def log_gateway_event(
+        self,
+        *,
+        event: str,
+        session_id: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        if self._audit_logger is None:
+            return
+        self._audit_logger.log_event(event=event, session_id=session_id, data=data)
 
     @classmethod
     def _should_send_processing_message(cls, content: str) -> bool:
@@ -673,14 +687,63 @@ class MessageProcessor:
             content=prompt,
             author_id=actor_id,
         )
+        if self._audit_logger is not None:
+            self._audit_logger.log_event(
+                event="ui_action",
+                session_id=session_id,
+                data={"actor_id": actor_id, "action": action_name},
+            )
+            self._audit_logger.log_user_message(
+                session_id=session_id,
+                author_id=actor_id,
+                message_id="ui-action",
+                guild_id=None,
+                channel_id="ui",
+                thread_id=None,
+                content=prompt,
+                attachment_count=0,
+            )
         latest_context = await self._store.get_context(session_id)
+        tool_started_at: dict[str, float] = {}
 
         try:
+            async def _tool_event(event: dict[str, Any]) -> None:
+                if self._audit_logger is None:
+                    return
+                phase = str(event.get("phase", "")).strip().lower()
+                call_id = str(event.get("call_id", "")).strip()
+                if not call_id:
+                    return
+                if phase == "start":
+                    tool_started_at[call_id] = self._time_fn()
+                    self._audit_logger.log_function_call(
+                        session_id=session_id,
+                        name=str(event.get("name", "")).strip() or "tool",
+                        arguments=event.get("arguments", {}),
+                        call_id=call_id,
+                    )
+                    return
+                if phase == "end":
+                    started = tool_started_at.pop(call_id, None)
+                    duration_ms = None
+                    if started is not None:
+                        duration_ms = max(0, int((self._time_fn() - started) * 1000))
+                    self._audit_logger.log_function_call_output(
+                        session_id=session_id,
+                        call_id=call_id,
+                        output=event.get("output"),
+                        duration_ms=duration_ms,
+                        tool_name=(
+                            str(event.get("name", "")).strip() or None
+                        ),
+                    )
+
             reply = await self._runtime.generate_reply(
                 AgentRequest(
                     session_id=session_id,
                     context=latest_context,
                     image_attachments=(),
+                    tool_event_callback=_tool_event,
                 )
             )
         except Exception:
@@ -690,8 +753,14 @@ class MessageProcessor:
                 actor_id,
                 action_name,
             )
+            if self._audit_logger is not None:
+                self._audit_logger.log_event(
+                    event="ui_action_failed",
+                    session_id=session_id,
+                    data={"actor_id": actor_id, "action": action_name},
+                )
             await self._mark_activity(session_id, self._time_fn())
-            await self._send_reply_safely(send_reply, self._fallback_message)
+            await self._send_reply_safely(send_reply, self._fallback_message, session_id=session_id)
             return None
 
         structured = self._structured_reply_from_text(reply, session_id=session_id)
@@ -708,6 +777,7 @@ class MessageProcessor:
         await self._send_reply_safely(
             send_reply,
             structured.markdown,
+            session_id=session_id,
             ui_intent=structured.ui_intent,
             image_urls=structured.image_urls,
             a2ui_components=structured.a2ui_components,
@@ -807,11 +877,20 @@ class MessageProcessor:
         send_reply: Callable[..., Awaitable[Any]],
         text: str,
         *,
+        session_id: str | None = None,
         ui_intent: UiIntent | None = None,
         image_urls: tuple[str, ...] = (),
         a2ui_components: tuple[dict[str, Any], ...] = (),
         surface_directives: tuple[SurfaceDirective, ...] = (),
     ) -> None:
+        if session_id is not None and self._audit_logger is not None:
+            self._audit_logger.log_assistant_message(
+                session_id=session_id,
+                content=text,
+                image_count=len(image_urls),
+                has_ui_intent=ui_intent is not None,
+                has_surface_directives=bool(surface_directives),
+            )
         chunks = self._split_discord_message(text)
         if not chunks:
             return
@@ -1098,8 +1177,26 @@ class MessageProcessor:
             await self._store.clear(session_id)
             await self._clear_auth_state(session_id)
             self._clear_surface_states_for_session(session_id)
-            await self._send_reply_safely(send_reply, "このチャンネルの会話コンテキストをリセットしました。")
+            if self._audit_logger is not None:
+                self._audit_logger.log_event(event="reset", session_id=session_id)
+            await self._send_reply_safely(
+                send_reply,
+                "このチャンネルの会話コンテキストをリセットしました。",
+                session_id=session_id,
+            )
             return
+
+        if self._audit_logger is not None:
+            self._audit_logger.log_user_message(
+                session_id=session_id,
+                author_id=message.author_id,
+                message_id=message.message_id,
+                guild_id=message.guild_id,
+                channel_id=message.channel_id,
+                thread_id=message.thread_id,
+                content=content,
+                attachment_count=len(message.attachments),
+            )
 
         auth_attempt = self._extract_auth_attempt(content)
         if auth_attempt is not None:
@@ -1107,12 +1204,23 @@ class MessageProcessor:
             if auth_response.startswith("認証に成功しました。"):
                 await self._store.clear(session_id)
                 self._clear_surface_states_for_session(session_id)
-            await self._send_reply_safely(send_reply, auth_response)
+            if self._audit_logger is not None:
+                self._audit_logger.log_event(
+                    event="auth_attempt",
+                    session_id=session_id,
+                    data={"success": auth_response.startswith("認証に成功しました。")},
+                )
+            await self._send_reply_safely(send_reply, auth_response, session_id=session_id)
             return
 
         if not await self._is_authenticated(session_id, now):
             await self._mark_activity(session_id, now)
-            await self._send_reply_safely(send_reply, await self._build_auth_prompt(session_id, now))
+            auth_prompt = await self._build_auth_prompt(session_id, now)
+            self.log_gateway_event(
+                event="auth_lockout" if auth_prompt.startswith("このセッションは一時ロック中です。") else "auth_prompt_shown",
+                session_id=session_id,
+            )
+            await self._send_reply_safely(send_reply, auth_prompt, session_id=session_id)
             return
 
         agent_memory_query = self._extract_agent_memory_query(content)
@@ -1131,13 +1239,31 @@ class MessageProcessor:
                 )
             if decision.action == "block":
                 await self._mark_activity(session_id, self._time_fn())
-                await self._send_reply_safely(send_reply, self._DEFENDER_BLOCK_MESSAGE)
+                if self._audit_logger is not None:
+                    self._audit_logger.log_event(
+                        event="prompt_defense_block",
+                        session_id=session_id,
+                        data={"score": round(float(decision.score), 4)},
+                    )
+                await self._send_reply_safely(
+                    send_reply,
+                    self._DEFENDER_BLOCK_MESSAGE,
+                    session_id=session_id,
+                )
                 return
             if decision.action == "sanitize":
                 user_content = decision.redacted_text or PromptInjectionDefender.FULL_REDACT_TEXT
-                await self._send_reply_safely(send_reply, self._DEFENDER_SANITIZE_NOTICE)
+                await self._send_reply_safely(
+                    send_reply,
+                    self._DEFENDER_SANITIZE_NOTICE,
+                    session_id=session_id,
+                )
             elif decision.action == "warn":
-                await self._send_reply_safely(send_reply, self._DEFENDER_WARN_MESSAGE)
+                await self._send_reply_safely(
+                    send_reply,
+                    self._DEFENDER_WARN_MESSAGE,
+                    session_id=session_id,
+                )
 
         await self._store.append(
             session_id,
@@ -1147,15 +1273,47 @@ class MessageProcessor:
         )
 
         context = await self._store.get_context(session_id)
+        tool_started_at: dict[str, float] = {}
 
         if self._processing_message and (
             self._should_send_processing_message(content) or bool(message.attachments)
         ):
-            await self._send_reply_safely(send_reply, self._processing_message)
+            await self._send_reply_safely(send_reply, self._processing_message, session_id=session_id)
 
         try:
             async def _progress_update(text: str) -> None:
-                await self._send_reply_safely(send_reply, text)
+                await self._send_reply_safely(send_reply, text, session_id=session_id)
+
+            async def _tool_event(event: dict[str, Any]) -> None:
+                if self._audit_logger is None:
+                    return
+                phase = str(event.get("phase", "")).strip().lower()
+                call_id = str(event.get("call_id", "")).strip()
+                if not call_id:
+                    return
+                if phase == "start":
+                    tool_started_at[call_id] = self._time_fn()
+                    self._audit_logger.log_function_call(
+                        session_id=session_id,
+                        name=str(event.get("name", "")).strip() or "tool",
+                        arguments=event.get("arguments", {}),
+                        call_id=call_id,
+                    )
+                    return
+                if phase == "end":
+                    started = tool_started_at.pop(call_id, None)
+                    duration_ms = None
+                    if started is not None:
+                        duration_ms = max(0, int((self._time_fn() - started) * 1000))
+                    self._audit_logger.log_function_call_output(
+                        session_id=session_id,
+                        call_id=call_id,
+                        output=event.get("output"),
+                        duration_ms=duration_ms,
+                        tool_name=(
+                            str(event.get("name", "")).strip() or None
+                        ),
+                    )
 
             reply = await self._runtime.generate_reply(
                 AgentRequest(
@@ -1163,10 +1321,13 @@ class MessageProcessor:
                     context=context,
                     image_attachments=tuple(image_attachments),
                     progress_callback=_progress_update,
+                    tool_event_callback=_tool_event,
                 )
             )
         except Exception:
             logger.exception("Agent execution failed. session_id=%s", session_id)
+            if self._audit_logger is not None:
+                self._audit_logger.log_event(event="agent_execution_failed", session_id=session_id)
             if agent_memory_query is not None:
                 reply = await self._handle_agent_memory(agent_memory_query)
                 await self._store.append(
@@ -1180,6 +1341,7 @@ class MessageProcessor:
                 await self._send_reply_safely(
                     send_reply,
                     structured_fallback.markdown,
+                    session_id=session_id,
                     ui_intent=structured_fallback.ui_intent,
                     image_urls=structured_fallback.image_urls,
                     a2ui_components=structured_fallback.a2ui_components,
@@ -1187,7 +1349,7 @@ class MessageProcessor:
                 )
                 return
             await self._mark_activity(session_id, self._time_fn())
-            await self._send_reply_safely(send_reply, self._fallback_message)
+            await self._send_reply_safely(send_reply, self._fallback_message, session_id=session_id)
             return
 
         structured = self._structured_reply_from_text(reply, session_id=session_id)
@@ -1206,6 +1368,7 @@ class MessageProcessor:
         await self._send_reply_safely(
             send_reply,
             structured.markdown,
+            session_id=session_id,
             ui_intent=structured.ui_intent,
             image_urls=structured.image_urls,
             a2ui_components=structured.a2ui_components,
@@ -1235,19 +1398,58 @@ class MessageProcessor:
             return "再実行できる会話履歴がありません。"
         if rerun_context[-1].get("role") != "user":
             return "最後のユーザー入力が見つからないため、再実行できません。"
+        tool_started_at: dict[str, float] = {}
 
         try:
+            async def _tool_event(event: dict[str, Any]) -> None:
+                if self._audit_logger is None:
+                    return
+                phase = str(event.get("phase", "")).strip().lower()
+                call_id = str(event.get("call_id", "")).strip()
+                if not call_id:
+                    return
+                if phase == "start":
+                    tool_started_at[call_id] = self._time_fn()
+                    self._audit_logger.log_function_call(
+                        session_id=session_id,
+                        name=str(event.get("name", "")).strip() or "tool",
+                        arguments=event.get("arguments", {}),
+                        call_id=call_id,
+                    )
+                    return
+                if phase == "end":
+                    started = tool_started_at.pop(call_id, None)
+                    duration_ms = None
+                    if started is not None:
+                        duration_ms = max(0, int((self._time_fn() - started) * 1000))
+                    self._audit_logger.log_function_call_output(
+                        session_id=session_id,
+                        call_id=call_id,
+                        output=event.get("output"),
+                        duration_ms=duration_ms,
+                        tool_name=(
+                            str(event.get("name", "")).strip() or None
+                        ),
+                    )
+
             reply = await self._runtime.generate_reply(
                 AgentRequest(
                     session_id=session_id,
                     context=rerun_context,
                     image_attachments=(),
+                    tool_event_callback=_tool_event,
                 )
             )
         except Exception:
             logger.exception("Rerun execution failed. session_id=%s actor_id=%s", session_id, actor_id)
             await self._mark_activity(session_id, self._time_fn())
-            await self._send_reply_safely(send_reply, self._fallback_message)
+            if self._audit_logger is not None:
+                self._audit_logger.log_event(
+                    event="rerun_failed",
+                    session_id=session_id,
+                    data={"actor_id": actor_id},
+                )
+            await self._send_reply_safely(send_reply, self._fallback_message, session_id=session_id)
             return None
 
         structured = self._structured_reply_from_text(reply, session_id=session_id)
@@ -1265,6 +1467,7 @@ class MessageProcessor:
         await self._send_reply_safely(
             send_reply,
             structured.markdown,
+            session_id=session_id,
             ui_intent=structured.ui_intent,
             image_urls=structured.image_urls,
             a2ui_components=structured.a2ui_components,
@@ -1300,19 +1503,58 @@ class MessageProcessor:
             author_id=actor_id,
         )
         latest_context = await self._store.get_context(session_id)
+        tool_started_at: dict[str, float] = {}
 
         try:
+            async def _tool_event(event: dict[str, Any]) -> None:
+                if self._audit_logger is None:
+                    return
+                phase = str(event.get("phase", "")).strip().lower()
+                call_id = str(event.get("call_id", "")).strip()
+                if not call_id:
+                    return
+                if phase == "start":
+                    tool_started_at[call_id] = self._time_fn()
+                    self._audit_logger.log_function_call(
+                        session_id=session_id,
+                        name=str(event.get("name", "")).strip() or "tool",
+                        arguments=event.get("arguments", {}),
+                        call_id=call_id,
+                    )
+                    return
+                if phase == "end":
+                    started = tool_started_at.pop(call_id, None)
+                    duration_ms = None
+                    if started is not None:
+                        duration_ms = max(0, int((self._time_fn() - started) * 1000))
+                    self._audit_logger.log_function_call_output(
+                        session_id=session_id,
+                        call_id=call_id,
+                        output=event.get("output"),
+                        duration_ms=duration_ms,
+                        tool_name=(
+                            str(event.get("name", "")).strip() or None
+                        ),
+                    )
+
             reply = await self._runtime.generate_reply(
                 AgentRequest(
                     session_id=session_id,
                     context=latest_context,
                     image_attachments=(),
+                    tool_event_callback=_tool_event,
                 )
             )
         except Exception:
             logger.exception("Detail execution failed. session_id=%s actor_id=%s", session_id, actor_id)
             await self._mark_activity(session_id, self._time_fn())
-            await self._send_reply_safely(send_reply, self._fallback_message)
+            if self._audit_logger is not None:
+                self._audit_logger.log_event(
+                    event="detail_failed",
+                    session_id=session_id,
+                    data={"actor_id": actor_id},
+                )
+            await self._send_reply_safely(send_reply, self._fallback_message, session_id=session_id)
             return None
 
         structured = self._structured_reply_from_text(reply, session_id=session_id)
@@ -1330,6 +1572,7 @@ class MessageProcessor:
         await self._send_reply_safely(
             send_reply,
             structured.markdown,
+            session_id=session_id,
             ui_intent=structured.ui_intent,
             image_urls=structured.image_urls,
             a2ui_components=structured.a2ui_components,
@@ -1419,6 +1662,29 @@ class DeepbotClientFactory:
         re.compile(r"^\s*>+\s*"),
         re.compile(r"^\s*`+"),
     )
+
+    @staticmethod
+    def _gateway_error_payload(exc: Exception) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
+        status = getattr(exc, "status", None)
+        if isinstance(status, int):
+            payload["http_status"] = status
+        code = getattr(exc, "code", None)
+        if isinstance(code, int):
+            payload["discord_code"] = code
+        return payload
+
+    @staticmethod
+    def _gateway_error_event_name(exc: Exception) -> str:
+        status = getattr(exc, "status", None)
+        if status == 429:
+            return "rate_limit_or_api_error"
+        if isinstance(status, int) and status >= 500:
+            return "rate_limit_or_api_error"
+        return "reply_failed"
 
     @staticmethod
     def _should_auto_thread_for_message(
@@ -1528,6 +1794,8 @@ class DeepbotClientFactory:
         text: str,
         renamed_threads: set[str],
         enabled: bool,
+        processor: MessageProcessor | None = None,
+        session_id: str | None = None,
         processing_message: str | None = None,
         fallback_message: str | None = None,
     ) -> None:
@@ -1553,8 +1821,20 @@ class DeepbotClientFactory:
         try:
             await thread.edit(name=new_name)
             renamed_threads.add(thread_id)
+            if processor is not None and session_id:
+                processor.log_gateway_event(
+                    event="thread_renamed",
+                    session_id=session_id,
+                    data={"thread_id": thread_id, "thread_name": new_name},
+                )
         except Exception as exc:
             logger.warning("Auto thread rename failed. thread_id=%s (%s)", thread_id, exc)
+            if processor is not None and session_id:
+                processor.log_gateway_event(
+                    event="thread_rename_failed",
+                    session_id=session_id,
+                    data={"thread_id": thread_id, **DeepbotClientFactory._gateway_error_payload(exc)},
+                )
 
     @staticmethod
     async def _maybe_start_auto_thread(
@@ -1566,6 +1846,8 @@ class DeepbotClientFactory:
         channel_ids: tuple[str, ...],
         trigger_keywords: tuple[str, ...],
         archive_minutes: int,
+        processor: MessageProcessor | None = None,
+        session_id: str | None = None,
     ) -> Any | None:
         if not DeepbotClientFactory._should_auto_thread_for_message(
             envelope,
@@ -1587,6 +1869,16 @@ class DeepbotClientFactory:
                 envelope.message_id,
                 exc,
             )
+            if processor is not None and session_id:
+                processor.log_gateway_event(
+                    event="thread_create_failed",
+                    session_id=session_id,
+                    data={
+                        "channel_id": envelope.channel_id,
+                        "message_id": envelope.message_id,
+                        **DeepbotClientFactory._gateway_error_payload(exc),
+                    },
+                )
             return None
 
     @staticmethod
@@ -1962,6 +2254,7 @@ class DeepbotClientFactory:
         content: str | None,
         view: Any | None,
         embeds: list[Any],
+        processor: MessageProcessor | None = None,
     ) -> Any | None:
         message_key = (session_id, directive.surface_id)
         existing_message = surface_messages.get(message_key)
@@ -1971,6 +2264,12 @@ class DeepbotClientFactory:
                     await existing_message.delete()
                 finally:
                     surface_messages.pop(message_key, None)
+                    if processor is not None:
+                        processor.log_gateway_event(
+                            event="surface_deleted",
+                            session_id=session_id,
+                            data={"surface_id": directive.surface_id},
+                        )
             return None
 
         if existing_message is not None and directive.type in {"updatecomponents", "updatedatamodel"}:
@@ -1978,21 +2277,61 @@ class DeepbotClientFactory:
                 await existing_message.edit(content=content, view=view, embeds=embeds)
             except Exception as exc:
                 logger.warning("Surface message edit failed with view. Retrying without view: %s", exc)
+                if processor is not None:
+                    processor.log_gateway_event(
+                        event=DeepbotClientFactory._gateway_error_event_name(exc),
+                        session_id=session_id,
+                        data={
+                            "path": "surface_edit_with_view",
+                            "surface_id": directive.surface_id,
+                            **DeepbotClientFactory._gateway_error_payload(exc),
+                        },
+                    )
                 fallback_content = content
                 if fallback_content is None and not embeds:
                     fallback_content = " "
                 await existing_message.edit(content=fallback_content, embeds=embeds)
+            if processor is not None:
+                processor.log_gateway_event(
+                    event="reply_sent",
+                    session_id=session_id,
+                    data={
+                        "path": "surface_edit",
+                        "surface_id": directive.surface_id,
+                        "discord_message_id": str(getattr(existing_message, "id", "") or ""),
+                    },
+                )
             return existing_message
 
         try:
             sent = await channel.send(content=content, view=view, embeds=embeds)
         except Exception as exc:
             logger.warning("Surface message send failed with view. Retrying without view: %s", exc)
+            if processor is not None:
+                processor.log_gateway_event(
+                    event=DeepbotClientFactory._gateway_error_event_name(exc),
+                    session_id=session_id,
+                    data={
+                        "path": "surface_send_with_view",
+                        "surface_id": directive.surface_id,
+                        **DeepbotClientFactory._gateway_error_payload(exc),
+                    },
+                )
             fallback_content = content
             if fallback_content is None and not embeds:
                 fallback_content = " "
             sent = await channel.send(content=fallback_content, embeds=embeds)
         surface_messages[message_key] = sent
+        if processor is not None:
+            processor.log_gateway_event(
+                event="reply_sent",
+                session_id=session_id,
+                data={
+                    "path": "surface_send",
+                    "surface_id": directive.surface_id,
+                    "discord_message_id": str(getattr(sent, "id", "") or ""),
+                },
+            )
         return sent
 
     @staticmethod
@@ -2026,6 +2365,19 @@ class DeepbotClientFactory:
 
             async def on_message(self, message: Any) -> None:
                 envelope = await _to_envelope(message)
+                session_id = MessageProcessor.build_session_id(envelope)
+                processor.log_gateway_event(
+                    event="message_received",
+                    session_id=session_id,
+                    data={
+                        "message_id": envelope.message_id,
+                        "guild_id": envelope.guild_id,
+                        "channel_id": envelope.channel_id,
+                        "thread_id": envelope.thread_id,
+                        "author_id": envelope.author_id,
+                        "attachment_count": len(envelope.attachments),
+                    },
+                )
                 auto_thread = await DeepbotClientFactory._maybe_start_auto_thread(
                     message,
                     envelope,
@@ -2034,18 +2386,29 @@ class DeepbotClientFactory:
                     channel_ids=auto_thread_channel_ids,
                     trigger_keywords=auto_thread_trigger_keywords,
                     archive_minutes=auto_thread_archive_minutes,
+                    processor=processor,
+                    session_id=session_id,
                 )
                 reply_channel = auto_thread or message.channel
                 if auto_thread is not None and envelope.thread_id is None:
                     thread_id = str(getattr(auto_thread, "id", "") or "").strip()
                     if thread_id:
                         envelope = replace(envelope, thread_id=thread_id)
+                        session_id = MessageProcessor.build_session_id(envelope)
+                        processor.log_gateway_event(
+                            event="thread_created",
+                            session_id=session_id,
+                            data={
+                                "thread_id": thread_id,
+                                "channel_id": envelope.channel_id,
+                                "message_id": envelope.message_id,
+                            },
+                        )
                 thread_for_rename = DeepbotClientFactory._resolve_thread_for_rename(
                     auto_thread=auto_thread,
                     reply_channel=reply_channel,
                     envelope=envelope,
                 )
-                session_id = MessageProcessor.build_session_id(envelope)
                 owner_user_id = envelope.author_id
                 surface_messages: dict[tuple[str, str], Any] = getattr(self, "_surface_messages", {})
                 setattr(self, "_surface_messages", surface_messages)
@@ -2083,6 +2446,7 @@ class DeepbotClientFactory:
                             content=content,
                             view=view,
                             embeds=embeds,
+                            processor=processor,
                         )
                         if sent is not None:
                             await DeepbotClientFactory._maybe_rename_thread_from_reply(
@@ -2090,18 +2454,41 @@ class DeepbotClientFactory:
                                 text=text,
                                 renamed_threads=renamed_threads,
                                 enabled=auto_thread_rename_from_reply,
+                                processor=processor,
+                                session_id=session_id,
                                 processing_message=processing_message,
                                 fallback_message=fallback_message,
                             )
                         return sent
                     if content is None and not embeds and view is None:
                         content = " "
-                    sent = await reply_channel.send(content=content, view=view, embeds=embeds)
+                    try:
+                        sent = await reply_channel.send(content=content, view=view, embeds=embeds)
+                    except Exception as exc:
+                        processor.log_gateway_event(
+                            event=DeepbotClientFactory._gateway_error_event_name(exc),
+                            session_id=session_id,
+                            data={
+                                "path": "channel_send",
+                                **DeepbotClientFactory._gateway_error_payload(exc),
+                            },
+                        )
+                        raise
+                    processor.log_gateway_event(
+                        event="reply_sent",
+                        session_id=session_id,
+                        data={
+                            "path": "channel_send",
+                            "discord_message_id": str(getattr(sent, "id", "") or ""),
+                        },
+                    )
                     await DeepbotClientFactory._maybe_rename_thread_from_reply(
                         thread=thread_for_rename,
                         text=text,
                         renamed_threads=renamed_threads,
                         enabled=auto_thread_rename_from_reply,
+                        processor=processor,
+                        session_id=session_id,
                         processing_message=processing_message,
                         fallback_message=fallback_message,
                     )

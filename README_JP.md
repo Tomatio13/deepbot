@@ -104,6 +104,7 @@ Discord
 - `BOT_FALLBACK_MESSAGE`: 失敗時の返信文
 - `BOT_PROCESSING_MESSAGE`: 「調べます」等の先行返信
 - `LOG_LEVEL`: ログレベル（通常 `INFO`）
+- `DEEPBOT_TRANSCRIPT`, `DEEPBOT_TRANSCRIPT_DIR`: 監査ログJSONLの有効化/出力先
 
 ### 2.1 GLM-4.7 を使う場合
 - `.env.litellm` に `GLM_API_KEY` を設定

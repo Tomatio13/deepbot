@@ -104,6 +104,7 @@ Use split env files to enforce least privilege.
 - `BOT_FALLBACK_MESSAGE`
 - `BOT_PROCESSING_MESSAGE`
 - `LOG_LEVEL`
+- `DEEPBOT_TRANSCRIPT`, `DEEPBOT_TRANSCRIPT_DIR`
 
 ### 2.1 Use GLM-4.7 via LiteLLM
 - Set `GLM_API_KEY` in `.env.litellm`
