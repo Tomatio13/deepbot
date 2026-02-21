@@ -47,6 +47,7 @@ def test_audit_logger_appends_user_assistant_and_event(tmp_path, monkeypatch) ->
         session_id="s1",
         content="world",
         image_count=1,
+        file_count=2,
         has_ui_intent=False,
         has_surface_directives=True,
     )
@@ -61,6 +62,7 @@ def test_audit_logger_appends_user_assistant_and_event(tmp_path, monkeypatch) ->
     ]
     assert records[1]["payload"]["role"] == "user"
     assert records[2]["payload"]["role"] == "assistant"
+    assert records[2]["payload"]["file_count"] == 2
     assert records[3]["payload"]["event"] == "agent_execution_failed"
 
 

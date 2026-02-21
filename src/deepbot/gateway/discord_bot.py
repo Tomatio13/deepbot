@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import io
 import ipaddress
 import json
 import logging
@@ -100,6 +101,7 @@ class StructuredReply:
     markdown: str
     ui_intent: UiIntent | None = None
     image_urls: tuple[str, ...] = ()
+    file_paths: tuple[str, ...] = ()
     a2ui_components: tuple[dict[str, Any], ...] = ()
     surface_directives: tuple["SurfaceDirective", ...] = ()
 
@@ -143,6 +145,7 @@ class MessageProcessor:
     _DISCORD_MAX_MESSAGE_LEN = 2000
     _MAX_UI_BUTTONS = 3
     _MAX_OUTPUT_IMAGES = 4
+    _MAX_OUTPUT_FILES = 4
     _MAX_A2UI_ENVELOPES = 8
     _SCHEDULED_RUNNING_DEFAULT_MESSAGE = "いま定期ジョブを実行中です。完了後に順番に対応します。"
     _DATA_BIND_RE = re.compile(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}")
@@ -218,7 +221,7 @@ class MessageProcessor:
         )
         self._active_scheduled_runs = 0
         self._scheduled_run_lock = asyncio.Lock()
-        self._cron_channel_sender: Callable[[str, str], Awaitable[Any]] | None = None
+        self._cron_channel_sender: Callable[..., Awaitable[Any]] | None = None
         self._scheduler_engine: Any = None
 
     def log_gateway_event(
@@ -691,10 +694,31 @@ class MessageProcessor:
             if len(image_urls) >= self._MAX_OUTPUT_IMAGES:
                 break
 
+        file_paths: list[str] = []
+        for key in ("files", "file_paths", "attachments"):
+            raw_files = payload.get(key)
+            if not isinstance(raw_files, list):
+                continue
+            for item in raw_files:
+                if isinstance(item, str):
+                    candidate = item.strip()
+                elif isinstance(item, dict):
+                    candidate = str(item.get("path", "")).strip()
+                else:
+                    continue
+                if not candidate or candidate in file_paths:
+                    continue
+                file_paths.append(candidate)
+                if len(file_paths) >= self._MAX_OUTPUT_FILES:
+                    break
+            if len(file_paths) >= self._MAX_OUTPUT_FILES:
+                break
+
         return StructuredReply(
             markdown=markdown,
             ui_intent=ui_intent,
             image_urls=tuple(image_urls),
+            file_paths=tuple(file_paths),
             surface_directives=(),
         )
 
@@ -826,12 +850,13 @@ class MessageProcessor:
             session_id=session_id,
             ui_intent=structured.ui_intent,
             image_urls=structured.image_urls,
+            file_paths=structured.file_paths,
             a2ui_components=structured.a2ui_components,
             surface_directives=structured.surface_directives,
         )
         return None
 
-    def set_cron_channel_sender(self, sender: Callable[[str, str], Awaitable[Any]]) -> None:
+    def set_cron_channel_sender(self, sender: Callable[..., Awaitable[Any]]) -> None:
         self._cron_channel_sender = sender
 
     def bind_scheduler_engine(self, engine: Any) -> None:
@@ -1194,7 +1219,10 @@ class MessageProcessor:
                     target_channel = job.created_channel_id or ""
                 if target_channel and self._cron_channel_sender is not None:
                     text = f"[定期ジョブ: {job.name}]\n{structured.markdown}"
-                    await self._cron_channel_sender(target_channel, text)
+                    try:
+                        await self._cron_channel_sender(target_channel, text, structured.file_paths)
+                    except TypeError:
+                        await self._cron_channel_sender(target_channel, text)
             return structured.markdown
         finally:
             await self._mark_scheduled_run(False)
@@ -1269,6 +1297,7 @@ class MessageProcessor:
         *,
         ui_intent: UiIntent | None = None,
         image_urls: tuple[str, ...] = (),
+        file_paths: tuple[str, ...] = (),
         a2ui_components: tuple[dict[str, Any], ...] = (),
         surface_directives: tuple[SurfaceDirective, ...] = (),
     ) -> None:
@@ -1277,6 +1306,7 @@ class MessageProcessor:
                 text,
                 ui_intent=ui_intent,
                 image_urls=image_urls,
+                file_paths=file_paths,
                 a2ui_components=a2ui_components,
                 surface_directives=surface_directives,
             )
@@ -1294,6 +1324,7 @@ class MessageProcessor:
         session_id: str | None = None,
         ui_intent: UiIntent | None = None,
         image_urls: tuple[str, ...] = (),
+        file_paths: tuple[str, ...] = (),
         a2ui_components: tuple[dict[str, Any], ...] = (),
         surface_directives: tuple[SurfaceDirective, ...] = (),
     ) -> None:
@@ -1302,6 +1333,7 @@ class MessageProcessor:
                 session_id=session_id,
                 content=text,
                 image_count=len(image_urls),
+                file_count=len(file_paths),
                 has_ui_intent=ui_intent is not None,
                 has_surface_directives=bool(surface_directives),
             )
@@ -1313,6 +1345,7 @@ class MessageProcessor:
             chunks[0],
             ui_intent=ui_intent,
             image_urls=image_urls,
+            file_paths=file_paths,
             a2ui_components=a2ui_components,
             surface_directives=surface_directives,
         )
@@ -1801,6 +1834,7 @@ class MessageProcessor:
             session_id=session_id,
             ui_intent=structured.ui_intent,
             image_urls=structured.image_urls,
+            file_paths=structured.file_paths,
             a2ui_components=structured.a2ui_components,
             surface_directives=structured.surface_directives,
         )
@@ -1900,6 +1934,7 @@ class MessageProcessor:
             session_id=session_id,
             ui_intent=structured.ui_intent,
             image_urls=structured.image_urls,
+            file_paths=structured.file_paths,
             a2ui_components=structured.a2ui_components,
             surface_directives=structured.surface_directives,
         )
@@ -2005,6 +2040,7 @@ class MessageProcessor:
             session_id=session_id,
             ui_intent=structured.ui_intent,
             image_urls=structured.image_urls,
+            file_paths=structured.file_paths,
             a2ui_components=structured.a2ui_components,
             surface_directives=structured.surface_directives,
         )
@@ -2070,6 +2106,8 @@ async def _to_envelope(message: Any) -> MessageEnvelope:
 
 class DeepbotClientFactory:
     _MAX_LAYOUT_ITEMS = 25
+    _MAX_DISCORD_OUTPUT_FILES = 4
+    _MAX_DISCORD_OUTPUT_FILE_BYTES = 20 * 1024 * 1024
     _LAYOUT_TOP_LEVEL_TYPES = {
         "text",
         "textdisplay",
@@ -2673,6 +2711,77 @@ class DeepbotClientFactory:
         return embeds
 
     @staticmethod
+    def _discord_output_roots() -> tuple[Path, ...]:
+        raw = os.environ.get("TOOL_WRITE_ROOTS", "/workspace,/tmp")
+        roots: list[Path] = []
+        for item in raw.split(","):
+            text = item.strip()
+            if not text:
+                continue
+            roots.append(Path(text).expanduser().resolve())
+        if not roots:
+            return (Path("/workspace").resolve(), Path("/tmp").resolve())
+        return tuple(roots)
+
+    @staticmethod
+    def _normalize_output_file_candidate(value: str, roots: tuple[Path, ...]) -> Path | None:
+        text = value.strip()
+        if not text or "://" in text:
+            return None
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = (Path.cwd() / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+        if not candidate.exists() or not candidate.is_file():
+            return None
+        for root in roots:
+            try:
+                if candidate.is_relative_to(root):
+                    return candidate
+            except Exception:
+                continue
+        return None
+
+    @classmethod
+    def _build_discord_files(cls, discord_module: Any, file_paths: tuple[str, ...]) -> list[Any]:
+        if not file_paths:
+            return []
+        roots = cls._discord_output_roots()
+        files: list[Any] = []
+        seen: set[str] = set()
+        for raw in file_paths:
+            if len(files) >= cls._MAX_DISCORD_OUTPUT_FILES:
+                break
+            path = cls._normalize_output_file_candidate(raw, roots)
+            if path is None:
+                continue
+            normalized = str(path)
+            if normalized in seen:
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size > cls._MAX_DISCORD_OUTPUT_FILE_BYTES:
+                continue
+            data = path.read_bytes()
+            files.append(discord_module.File(io.BytesIO(data), filename=path.name))
+            seen.add(normalized)
+        return files
+
+    @staticmethod
+    def _close_discord_files(files: list[Any]) -> None:
+        for item in files:
+            fp = getattr(item, "fp", None)
+            close = getattr(fp, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    continue
+
+    @staticmethod
     def _last_surface_directive(
         surface_directives: tuple[SurfaceDirective, ...],
     ) -> SurfaceDirective | None:
@@ -2802,11 +2911,26 @@ class DeepbotClientFactory:
                 if scheduler is not None:
                     scheduler.start()
 
-                async def _send_to_channel_id(channel_id: str, text: str) -> Any:
+                async def _send_to_channel_id(
+                    channel_id: str,
+                    text: str,
+                    file_paths: tuple[str, ...] = (),
+                ) -> Any:
                     channel_obj = self.get_channel(int(channel_id))
                     if channel_obj is None:
                         channel_obj = await self.fetch_channel(int(channel_id))
-                    return await channel_obj.send(text)
+                    files = await asyncio.to_thread(
+                        DeepbotClientFactory._build_discord_files,
+                        discord,
+                        file_paths,
+                    )
+                    try:
+                        kwargs: dict[str, Any] = {"content": text}
+                        if files:
+                            kwargs["files"] = files
+                        return await channel_obj.send(**kwargs)
+                    finally:
+                        DeepbotClientFactory._close_discord_files(files)
 
                 processor.set_cron_channel_sender(_send_to_channel_id)
                 if scheduler is not None:
@@ -2876,6 +3000,7 @@ class DeepbotClientFactory:
                     *,
                     ui_intent: UiIntent | None = None,
                     image_urls: tuple[str, ...] = (),
+                    file_paths: tuple[str, ...] = (),
                     a2ui_components: tuple[dict[str, Any], ...] = (),
                     surface_directives: tuple[SurfaceDirective, ...] = (),
                 ) -> Any:
@@ -2886,38 +3011,55 @@ class DeepbotClientFactory:
                         on_action=_on_button_action,
                     )
                     embeds = DeepbotClientFactory._build_image_embeds(discord, image_urls)
+                    files = await asyncio.to_thread(
+                        DeepbotClientFactory._build_discord_files,
+                        discord,
+                        file_paths,
+                    )
                     content = text if text else None
                     if DeepbotClientFactory._is_layout_view(view):
                         # Components V2 forbids using message content with LayoutView.
                         content = None
                     surface_directive = DeepbotClientFactory._last_surface_directive(surface_directives)
                     if surface_directive is not None:
-                        sent = await DeepbotClientFactory._send_or_update_surface_message(
-                            channel=reply_channel,
-                            session_id=session_id,
-                            surface_messages=surface_messages,
-                            directive=surface_directive,
-                            content=content,
-                            view=view,
-                            embeds=embeds,
-                            processor=processor,
-                        )
-                        if sent is not None:
-                            await DeepbotClientFactory._maybe_rename_thread_from_reply(
-                                thread=thread_for_rename,
-                                text=text,
-                                renamed_threads=renamed_threads,
-                                enabled=auto_thread_rename_from_reply,
-                                processor=processor,
+                        try:
+                            sent = await DeepbotClientFactory._send_or_update_surface_message(
+                                channel=reply_channel,
                                 session_id=session_id,
-                                processing_message=processing_message,
-                                fallback_message=fallback_message,
+                                surface_messages=surface_messages,
+                                directive=surface_directive,
+                                content=content,
+                                view=view,
+                                embeds=embeds,
+                                processor=processor,
                             )
-                        return sent
-                    if content is None and not embeds and view is None:
+                            if files:
+                                await reply_channel.send(files=files)
+                            if sent is not None:
+                                await DeepbotClientFactory._maybe_rename_thread_from_reply(
+                                    thread=thread_for_rename,
+                                    text=text,
+                                    renamed_threads=renamed_threads,
+                                    enabled=auto_thread_rename_from_reply,
+                                    processor=processor,
+                                    session_id=session_id,
+                                    processing_message=processing_message,
+                                    fallback_message=fallback_message,
+                                )
+                            return sent
+                        finally:
+                            DeepbotClientFactory._close_discord_files(files)
+                    if content is None and not embeds and view is None and not files:
                         content = " "
                     try:
-                        sent = await reply_channel.send(content=content, view=view, embeds=embeds)
+                        kwargs: dict[str, Any] = {
+                            "content": content,
+                            "view": view,
+                            "embeds": embeds,
+                        }
+                        if files:
+                            kwargs["files"] = files
+                        sent = await reply_channel.send(**kwargs)
                     except Exception as exc:
                         processor.log_gateway_event(
                             event=DeepbotClientFactory._gateway_error_event_name(exc),
@@ -2928,6 +3070,8 @@ class DeepbotClientFactory:
                             },
                         )
                         raise
+                    finally:
+                        DeepbotClientFactory._close_discord_files(files)
                     processor.log_gateway_event(
                         event="reply_sent",
                         session_id=session_id,

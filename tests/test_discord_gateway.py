@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import types
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -814,6 +815,85 @@ async def test_structured_reply_forwards_ui_and_images() -> None:
     assert sent[-1][1] == UiIntent(
         buttons=(ButtonIntent(label="詳細", style="primary", action=None, url=None, payload="詳細です"),)
     )
+
+
+@pytest.mark.asyncio
+async def test_structured_reply_forwards_files() -> None:
+    store = SessionStore(max_messages=10, ttl_seconds=300)
+    runtime = StructuredReplyRuntime(
+        payload='{"markdown":"添付します","files":["/workspace/out.wav",{"path":"/workspace/out.png"}]}'
+    )
+    processor = MessageProcessor(
+        store=store,
+        runtime=runtime,
+        fallback_message="fallback",
+        processing_message=PROCESSING,
+    )
+    sent: list[tuple[str, tuple[str, ...]]] = []
+
+    async def send_reply(
+        text: str,
+        *,
+        file_paths: tuple[str, ...] = (),
+        **_: Any,
+    ):
+        sent.append((text, file_paths))
+
+    await processor.handle_message(
+        MessageEnvelope(
+            message_id="1",
+            content="ファイル付きで返して",
+            author_id="u1",
+            author_is_bot=False,
+            guild_id="g1",
+            channel_id="c1",
+            thread_id=None,
+            attachments=(),
+        ),
+        send_reply=send_reply,
+    )
+
+    assert runtime.calls == 1
+    assert sent[-1][0] == "添付します"
+    assert sent[-1][1] == ("/workspace/out.wav", "/workspace/out.png")
+
+
+def test_build_discord_files_from_allowed_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "voice.wav"
+    target.write_bytes(b"RIFFxxxxWAVE")
+    monkeypatch.setenv("TOOL_WRITE_ROOTS", str(tmp_path))
+
+    class _FakeFile:
+        def __init__(self, fp: Any, filename: str) -> None:
+            self.fp = fp
+            self.filename = filename
+
+    class _FakeDiscord:
+        File = _FakeFile
+
+    files = DeepbotClientFactory._build_discord_files(_FakeDiscord, (str(target),))
+    assert len(files) == 1
+    assert files[0].filename == "voice.wav"
+    DeepbotClientFactory._close_discord_files(files)
+
+
+def test_build_discord_files_rejects_outside_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    allowed_root = tmp_path / "allowed"
+    allowed_root.mkdir()
+    outside = tmp_path / "outside.wav"
+    outside.write_bytes(b"RIFFxxxxWAVE")
+    monkeypatch.setenv("TOOL_WRITE_ROOTS", str(allowed_root))
+
+    class _FakeFile:
+        def __init__(self, fp: Any, filename: str) -> None:
+            self.fp = fp
+            self.filename = filename
+
+    class _FakeDiscord:
+        File = _FakeFile
+
+    files = DeepbotClientFactory._build_discord_files(_FakeDiscord, (str(outside),))
+    assert files == []
 
 
 @pytest.mark.asyncio

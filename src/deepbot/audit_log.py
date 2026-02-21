@@ -125,6 +125,7 @@ class AuditLogger:
         session_id: str,
         content: str,
         image_count: int = 0,
+        file_count: int = 0,
         has_ui_intent: bool = False,
         has_surface_directives: bool = False,
     ) -> None:
@@ -135,6 +136,7 @@ class AuditLogger:
                 "role": "assistant",
                 "session_id": session_id,
                 "image_count": image_count,
+                "file_count": file_count,
                 "has_ui_intent": has_ui_intent,
                 "has_surface_directives": has_surface_directives,
                 "content": [{"type": "output_text", "text": self._sanitize_text(content)}],
