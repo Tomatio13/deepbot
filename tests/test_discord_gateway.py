@@ -670,6 +670,237 @@ async def test_to_envelope_uses_thread_channel_id_when_message_thread_missing() 
 
 
 @pytest.mark.asyncio
+async def test_cleanup_command_purges_in_chunks_for_admin() -> None:
+    class DummyProcessor:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, str, dict[str, Any] | None]] = []
+
+        def log_gateway_event(
+            self,
+            *,
+            event: str,
+            session_id: str,
+            data: dict[str, Any] | None = None,
+        ) -> None:
+            self.events.append((event, session_id, data))
+
+    class DummyChannel:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+            self.purge_limits: list[int] = []
+            self.purge_bulk_args: list[bool] = []
+            self._batches = [100, 37]
+
+        async def purge(self, *, limit: int, bulk: bool = True):
+            self.purge_limits.append(limit)
+            self.purge_bulk_args.append(bulk)
+            count = self._batches.pop(0)
+            return [object() for _ in range(count)]
+
+        async def send(self, text: str):
+            self.sent.append(text)
+
+    channel = DummyChannel()
+    message = SimpleNamespace(
+        content="/cleanup",
+        guild=SimpleNamespace(id=1),
+        channel=channel,
+        author=SimpleNamespace(id=10, guild_permissions=SimpleNamespace(administrator=True)),
+    )
+    processor = DummyProcessor()
+
+    handled = await DeepbotClientFactory._try_handle_cleanup_command(
+        message,
+        processor=processor,  # type: ignore[arg-type]
+        session_id="guild:g1:channel:c1:user:u1",
+    )
+
+    assert handled is True
+    assert channel.purge_limits == [100, 100]
+    assert channel.purge_bulk_args == [True, True]
+    assert channel.sent == ["塵一つ残らないね！"]
+    assert any(event == "cleanup_succeeded" for event, _, _ in processor.events)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_command_rejects_non_admin_user() -> None:
+    class DummyProcessor:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def log_gateway_event(self, *, event: str, session_id: str, data: dict[str, Any] | None = None) -> None:
+            self.events.append(event)
+
+    class DummyChannel:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+            self.purge_called = False
+
+        async def purge(self, *, limit: int):
+            self.purge_called = True
+            return []
+
+        async def send(self, text: str):
+            self.sent.append(text)
+
+    channel = DummyChannel()
+    message = SimpleNamespace(
+        content="/cleanup",
+        guild=SimpleNamespace(id=1),
+        channel=channel,
+        author=SimpleNamespace(id=11, guild_permissions=SimpleNamespace(administrator=False)),
+    )
+    processor = DummyProcessor()
+
+    handled = await DeepbotClientFactory._try_handle_cleanup_command(
+        message,
+        processor=processor,  # type: ignore[arg-type]
+        session_id="guild:g1:channel:c1:user:u2",
+    )
+
+    assert handled is True
+    assert channel.purge_called is False
+    assert channel.sent == ["何様のつもり？"]
+    assert "cleanup_rejected_permission" in processor.events
+
+
+@pytest.mark.asyncio
+async def test_cleanup_command_rejects_dm() -> None:
+    class DummyProcessor:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def log_gateway_event(self, *, event: str, session_id: str, data: dict[str, Any] | None = None) -> None:
+            self.events.append(event)
+
+    class DummyChannel:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        async def send(self, text: str):
+            self.sent.append(text)
+
+    channel = DummyChannel()
+    message = SimpleNamespace(
+        content="/cleanup",
+        guild=None,
+        channel=channel,
+        author=SimpleNamespace(id=12, guild_permissions=SimpleNamespace(administrator=True)),
+    )
+    processor = DummyProcessor()
+
+    handled = await DeepbotClientFactory._try_handle_cleanup_command(
+        message,
+        processor=processor,  # type: ignore[arg-type]
+        session_id="dm:u1",
+    )
+
+    assert handled is True
+    assert channel.sent == ["このコマンドはサーバー内のチャンネルでのみ使えます。"]
+    assert "cleanup_rejected_guild_only" in processor.events
+
+
+@pytest.mark.asyncio
+async def test_cleanup_command_rejects_when_bot_lacks_permissions() -> None:
+    class DummyProcessor:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def log_gateway_event(self, *, event: str, session_id: str, data: dict[str, Any] | None = None) -> None:
+            self.events.append(event)
+
+    class DummyChannel:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+            self.purge_called = False
+
+        def permissions_for(self, _: Any) -> Any:
+            return SimpleNamespace(manage_messages=False, read_message_history=True)
+
+        async def purge(self, *, limit: int, bulk: bool = True):
+            self.purge_called = True
+            return []
+
+        async def send(self, text: str):
+            self.sent.append(text)
+
+    channel = DummyChannel()
+    message = SimpleNamespace(
+        content="/cleanup",
+        guild=SimpleNamespace(id=1, me=SimpleNamespace(id=999)),
+        channel=channel,
+        author=SimpleNamespace(id=13, guild_permissions=SimpleNamespace(administrator=True)),
+    )
+    processor = DummyProcessor()
+
+    handled = await DeepbotClientFactory._try_handle_cleanup_command(
+        message,
+        processor=processor,  # type: ignore[arg-type]
+        session_id="guild:g1:channel:c1:user:u3",
+    )
+
+    assert handled is True
+    assert channel.purge_called is False
+    assert channel.sent == ["Botにチャンネル権限 `メッセージの管理` と `メッセージ履歴を読む` が必要です。"]
+    assert "cleanup_rejected_bot_permission" in processor.events
+
+
+@pytest.mark.asyncio
+async def test_cleanup_command_falls_back_to_non_bulk_for_old_messages() -> None:
+    class DummyProcessor:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict[str, Any] | None]] = []
+
+        def log_gateway_event(self, *, event: str, session_id: str, data: dict[str, Any] | None = None) -> None:
+            self.events.append((event, data))
+
+    class BulkDeleteOldMessagesError(Exception):
+        status = 400
+        code = 50034
+
+    class DummyChannel:
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+            self.bulk_calls = 0
+            self.non_bulk_calls = 0
+            self._non_bulk_batches = [100, 12]
+
+        async def purge(self, *, limit: int, bulk: bool = True):
+            assert limit == 100
+            if bulk:
+                self.bulk_calls += 1
+                raise BulkDeleteOldMessagesError("too old for bulk")
+            self.non_bulk_calls += 1
+            count = self._non_bulk_batches.pop(0)
+            return [object() for _ in range(count)]
+
+        async def send(self, text: str):
+            self.sent.append(text)
+
+    channel = DummyChannel()
+    message = SimpleNamespace(
+        content="/cleanup",
+        guild=SimpleNamespace(id=1),
+        channel=channel,
+        author=SimpleNamespace(id=14, guild_permissions=SimpleNamespace(administrator=True)),
+    )
+    processor = DummyProcessor()
+
+    handled = await DeepbotClientFactory._try_handle_cleanup_command(
+        message,
+        processor=processor,  # type: ignore[arg-type]
+        session_id="guild:g1:channel:c1:user:u4",
+    )
+
+    assert handled is True
+    assert channel.bulk_calls == 1
+    assert channel.non_bulk_calls == 2
+    assert channel.sent == ["塵一つ残らないね！"]
+    succeeded_events = [event for event, _ in processor.events if event == "cleanup_succeeded"]
+    assert succeeded_events
+
+
+@pytest.mark.asyncio
 async def test_long_reply_is_split_to_fit_discord_limit() -> None:
     store = SessionStore(max_messages=10, ttl_seconds=300)
     runtime = LongReplyRuntime(size=4500)

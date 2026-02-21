@@ -18,6 +18,7 @@ Discord bot built with Strands Agents. It replies automatically to user messages
 - Auto-reply in Discord channels/threads
 - Per-user short-term memory per channel/thread
 - `/reset` command to clear session context
+- `/cleanup` command to purge channel logs (admin-only trigger)
 - Skill execution from `config/skills` via `$skill_name` or `/skill_name`
 - Image attachment forwarding (`png/jpeg/gif/webp`) to model input
 - Prompt-driven rich replies via JSON (`markdown`, `ui_intent.buttons`, `images`) for buttons and image embeds
@@ -54,7 +55,7 @@ docker compose logs -f deepbot
 - Mounts `./config` to `/app/config` as read-only.
 - Mounts `./workspace` to `/workspace` as read-write.
 - Uses `SYS_ADMIN/NET_ADMIN` and unconfined `seccomp/apparmor` for `srt` (`bubblewrap`).
-- `srt` filesystem policy blocks read/write access to `/app` and only allows writes under `/workspace` and `/tmp`.
+- `srt` filesystem policy keeps `/app` write-protected, allows writes only under `/workspace` and `/tmp`, and denies reads for secret paths (for example `/app/.env`, `/app/.git`, `/app/config/mcp.json`, `/app/config/AGENT.md`).
 - Rebuild after code changes:
 ```bash
 docker compose build deepbot
@@ -126,7 +127,7 @@ docker compose up -d --build
 
 ### 3.1 Scheduled Jobs (Cron-like)
 - `CRON_ENABLED=true`
-- `CRON_JOBS_DIR=/workspace/jobs` (must be writable)
+- `CRON_JOBS_DIR=/workspace/bot-rw/jobs` (must be writable)
 - `CRON_DEFAULT_TIMEZONE=Asia/Tokyo`
 - `CRON_POLL_SECONDS=15`
 - `CRON_BUSY_MESSAGE`
@@ -181,16 +182,19 @@ Current supported schedule text:
 - `ENABLED_DANGEROUS_TOOLS`
 - `SHELL_SRT_ENFORCED=true`
 - `SHELL_SRT_SETTINGS_PATH`
-- `SHELL_DENY_PATH_PREFIXES=/app`
+- `SHELL_DENY_PATH_PREFIXES`: absolute path prefix denylist for `shell` commands (set secret paths, not whole `/app`)
 - `TOOL_WRITE_ROOTS` (applies to `file_read` / `file_write` / `editor`)
+- `WORKSPACE_DIR` / `BOT_RW_DIR` (recommended writable workspace root for tools and memory)
 
 Minimal example for dangerous tools:
 ```env
 DANGEROUS_TOOLS_ENABLED=true
 ENABLED_DANGEROUS_TOOLS=shell,file_read
 SHELL_SRT_ENFORCED=true
-SHELL_DENY_PATH_PREFIXES=/app
-TOOL_WRITE_ROOTS=/workspace
+SHELL_DENY_PATH_PREFIXES=/app/.env,/app/.git,/app/config/AGENT.md,/app/config/mcp.json,/root/.ssh,/root/.gnupg,/root/.aws,/workspace/config/skills/nature-remo-skill/.env,/workspace/agent-memory/memory
+WORKSPACE_DIR=/workspace/bot-rw
+BOT_RW_DIR=/workspace/bot-rw
+TOOL_WRITE_ROOTS=/workspace/bot-rw,/tmp
 ```
 
 ## 🧩 Related Files
@@ -215,6 +219,15 @@ description: Document review workflow
 ```bash
 pytest -q
 ```
+
+## 🧹 `/cleanup` Command
+- Trigger: send `/cleanup` in a guild text channel.
+- Access control: only users with `Administrator` can trigger this command.
+- Bot permissions required in the target channel:
+  - `View Channel`
+  - `Read Message History`
+  - `Manage Messages`
+- If bulk delete fails due to old messages, deepbot retries with non-bulk deletion.
 
 ## 📌 Troubleshooting
 1. Startup error: check `AUTH_PASSPHRASE` is not empty

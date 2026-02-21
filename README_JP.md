@@ -18,6 +18,7 @@ Strands Agents を使った Discord Bot です。ユーザーの発言に自動�
 - Discord メッセージに自動返信
 - ユーザー単位の短期メモリ（チャンネル/スレッドごと）
 - `/reset` で会話コンテキストを初期化
+- `/cleanup` でチャンネルログを一括削除（管理者のみ実行可）
 - `config/skills` の Skill を `$skill名` / `/skill名` で実行
 - 画像添付（`png/jpeg/gif/webp`）をモデル入力へ転送
 - JSON（`markdown`, `ui_intent.buttons`, `images`）による見せ方指定で、ボタンUIと画像Embedを返せる
@@ -54,7 +55,7 @@ docker compose logs -f deepbot
 - `./config` は `/app/config` に read-only マウント。
 - `./workspace` は `/workspace` に read-write マウント。
 - `srt`（bubblewrap）を使うため、Compose は `SYS_ADMIN/NET_ADMIN` と `seccomp/apparmor=unconfined` を使います。
-- `srt` のファイルシステムポリシーで `/app` の read/write を禁止し、書き込みは `/workspace` と `/tmp` のみ許可しています。
+- `srt` のファイルシステムポリシーで `/app` は書き込み禁止のまま維持し、書き込みは `/workspace` と `/tmp` のみ許可、読み取りは禁止対象を機密パス（例: `/app/.env`, `/app/.git`, `/app/config/mcp.json`, `/app/config/AGENT.md`）に限定しています。
 - コード変更後は必ず再ビルドが必要です。
 ```bash
 docker compose build deepbot
@@ -126,7 +127,7 @@ docker compose up -d --build
 
 ### 3.1 定期ジョブ設定（cron風）
 - `CRON_ENABLED=true`
-- `CRON_JOBS_DIR=/workspace/jobs`（書き込み可能なパスが必須）
+- `CRON_JOBS_DIR=/workspace/bot-rw/jobs`（書き込み可能なパスが必須）
 - `CRON_DEFAULT_TIMEZONE=Asia/Tokyo`
 - `CRON_POLL_SECONDS=15`
 - `CRON_BUSY_MESSAGE`
@@ -181,15 +182,18 @@ docker compose up -d --build
 - `ENABLED_DANGEROUS_TOOLS`: 有効化する危険ツールの許可リスト
 - `SHELL_SRT_ENFORCED=true`: shell を `srt --settings ... -c` 形式に強制
 - `SHELL_SRT_SETTINGS_PATH`: srt 設定ファイル
-- `SHELL_DENY_PATH_PREFIXES=/app`: shell で参照を禁止する絶対パス接頭辞
-- `TOOL_WRITE_ROOTS=/workspace`: `file_read`/`file_write`/`editor` の許可範囲
+- `SHELL_DENY_PATH_PREFIXES`: shell で参照を禁止する絶対パス接頭辞（`/app` 全体ではなく機密パスを列挙）
+- `TOOL_WRITE_ROOTS`: `file_read`/`file_write`/`editor` の許可範囲
+- `WORKSPACE_DIR` / `BOT_RW_DIR`: ツール・メモリ保存先として使う推奨RWルート
 
 危険ツールを有効化する場合の最小例:
 ```env
 DANGEROUS_TOOLS_ENABLED=true
 ENABLED_DANGEROUS_TOOLS=shell,file_read
 SHELL_SRT_ENFORCED=true
-TOOL_WRITE_ROOTS=/workspace
+WORKSPACE_DIR=/workspace/bot-rw
+BOT_RW_DIR=/workspace/bot-rw
+TOOL_WRITE_ROOTS=/workspace/bot-rw,/tmp
 ```
 
 ## 🧩 補助ファイル
@@ -214,6 +218,15 @@ description: ドキュメントレビュー手順
 ```bash
 pytest -q
 ```
+
+## 🧹 `/cleanup` コマンド
+- 実行方法: サーバー内のテキストチャンネルで `/cleanup` を送信。
+- 実行者の条件: `Administrator` 権限を持つユーザーのみ実行可能。
+- 対象チャンネルで Bot に必要な権限:
+  - `View Channel`（チャンネルを見る）
+  - `Read Message History`（メッセージ履歴を読む）
+  - `Manage Messages`（メッセージの管理）
+- 古いメッセージ混在で bulk 削除が失敗した場合、deepbot は non-bulk 削除に自動フォールバックします。
 
 ## 📌 トラブル時の確認
 1. 起動しない: `AUTH_PASSPHRASE` が空でないか確認

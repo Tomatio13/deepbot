@@ -2134,6 +2134,14 @@ class DeepbotClientFactory:
         r"(?:スレッド.*(?:立てて|作って|作成)|(?:^|[\s　])(?:/thread)(?:[\s　]|$))",
         re.IGNORECASE,
     )
+    _CLEANUP_COMMAND = "/cleanup"
+    _CLEANUP_SUCCESS_MESSAGE = "塵一つ残らないね！"
+    _CLEANUP_FORBIDDEN_MESSAGE = "何様のつもり？"
+    _CLEANUP_FAILED_MESSAGE = "ログ削除に失敗しました。権限とチャンネル種別を確認してください。"
+    _CLEANUP_GUILD_ONLY_MESSAGE = "このコマンドはサーバー内のチャンネルでのみ使えます。"
+    _CLEANUP_BOT_PERMISSION_MESSAGE = (
+        "Botにチャンネル権限 `メッセージの管理` と `メッセージ履歴を読む` が必要です。"
+    )
 
     @staticmethod
     def _gateway_error_payload(exc: Exception) -> dict[str, Any]:
@@ -2157,6 +2165,119 @@ class DeepbotClientFactory:
         if isinstance(status, int) and status >= 500:
             return "rate_limit_or_api_error"
         return "reply_failed"
+
+    @staticmethod
+    def _is_cleanup_command(message: Any) -> bool:
+        content = str(getattr(message, "content", "") or "").strip()
+        return content == DeepbotClientFactory._CLEANUP_COMMAND
+
+    @staticmethod
+    async def _try_handle_cleanup_command(
+        message: Any,
+        *,
+        processor: MessageProcessor,
+        session_id: str,
+    ) -> bool:
+        if not DeepbotClientFactory._is_cleanup_command(message):
+            return False
+
+        channel = getattr(message, "channel", None)
+        guild = getattr(message, "guild", None)
+        if guild is None or channel is None:
+            if channel is not None and hasattr(channel, "send"):
+                await channel.send(DeepbotClientFactory._CLEANUP_GUILD_ONLY_MESSAGE)
+            processor.log_gateway_event(event="cleanup_rejected_guild_only", session_id=session_id)
+            return True
+
+        author = getattr(message, "author", None)
+        guild_permissions = getattr(author, "guild_permissions", None)
+        is_admin = bool(getattr(guild_permissions, "administrator", False))
+        if not is_admin:
+            await channel.send(DeepbotClientFactory._CLEANUP_FORBIDDEN_MESSAGE)
+            processor.log_gateway_event(
+                event="cleanup_rejected_permission",
+                session_id=session_id,
+                data={"author_id": str(getattr(author, "id", "") or "")},
+            )
+            return True
+
+        permissions_for = getattr(channel, "permissions_for", None)
+        guild_me = getattr(guild, "me", None)
+        if callable(permissions_for) and guild_me is not None:
+            bot_permissions = permissions_for(guild_me)
+            can_manage_messages = bool(getattr(bot_permissions, "manage_messages", False))
+            can_read_history = bool(getattr(bot_permissions, "read_message_history", False))
+            if not can_manage_messages or not can_read_history:
+                await channel.send(DeepbotClientFactory._CLEANUP_BOT_PERMISSION_MESSAGE)
+                processor.log_gateway_event(
+                    event="cleanup_rejected_bot_permission",
+                    session_id=session_id,
+                    data={
+                        "can_manage_messages": can_manage_messages,
+                        "can_read_message_history": can_read_history,
+                    },
+                )
+                return True
+
+        purge = getattr(channel, "purge", None)
+        if not callable(purge):
+            await channel.send(DeepbotClientFactory._CLEANUP_FAILED_MESSAGE)
+            processor.log_gateway_event(event="cleanup_failed_unsupported_channel", session_id=session_id)
+            return True
+
+        try:
+            deleted_total = await DeepbotClientFactory._purge_all_messages(channel, bulk=True)
+            await channel.send(DeepbotClientFactory._CLEANUP_SUCCESS_MESSAGE)
+            processor.log_gateway_event(
+                event="cleanup_succeeded",
+                session_id=session_id,
+                data={"deleted_messages": deleted_total, "bulk": True},
+            )
+        except Exception as exc:
+            # Bulk delete cannot remove old messages in some cases; retry with one-by-one delete.
+            if getattr(exc, "code", None) == 50034:
+                try:
+                    deleted_total = await DeepbotClientFactory._purge_all_messages(channel, bulk=False)
+                    await channel.send(DeepbotClientFactory._CLEANUP_SUCCESS_MESSAGE)
+                    processor.log_gateway_event(
+                        event="cleanup_succeeded",
+                        session_id=session_id,
+                        data={"deleted_messages": deleted_total, "bulk": False},
+                    )
+                    return True
+                except Exception as fallback_exc:
+                    processor.log_gateway_event(
+                        event=DeepbotClientFactory._gateway_error_event_name(fallback_exc),
+                        session_id=session_id,
+                        data={
+                            "path": "cleanup_purge_fallback_non_bulk",
+                            **DeepbotClientFactory._gateway_error_payload(fallback_exc),
+                        },
+                    )
+                    await channel.send(DeepbotClientFactory._CLEANUP_FAILED_MESSAGE)
+                    return True
+            processor.log_gateway_event(
+                event=DeepbotClientFactory._gateway_error_event_name(exc),
+                session_id=session_id,
+                data={
+                    "path": "cleanup_purge",
+                    **DeepbotClientFactory._gateway_error_payload(exc),
+                },
+            )
+            await channel.send(DeepbotClientFactory._CLEANUP_FAILED_MESSAGE)
+        return True
+
+    @staticmethod
+    async def _purge_all_messages(channel: Any, *, bulk: bool) -> int:
+        purge = getattr(channel, "purge")
+        deleted_total = 0
+        while True:
+            deleted = await purge(limit=100, bulk=bulk)
+            deleted_count = len(deleted) if isinstance(deleted, list) else 0
+            deleted_total += deleted_count
+            if deleted_count < 100:
+                break
+        return deleted_total
 
     @staticmethod
     def _should_auto_thread_for_message(
@@ -2956,6 +3077,12 @@ class DeepbotClientFactory:
                         "attachment_count": len(envelope.attachments),
                     },
                 )
+                if await DeepbotClientFactory._try_handle_cleanup_command(
+                    message,
+                    processor=processor,
+                    session_id=session_id,
+                ):
+                    return
                 auto_thread = await DeepbotClientFactory._maybe_start_auto_thread(
                     message,
                     envelope,
