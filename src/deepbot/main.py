@@ -7,6 +7,7 @@ from deepbot.config import ConfigError, load_config, to_runtime_settings
 from deepbot.gateway.discord_bot import AuthConfig, DeepbotClientFactory, MessageProcessor
 from deepbot.logging import setup_logging
 from deepbot.memory.session_store import SessionStore
+from deepbot.scheduler import SchedulerEngine, SchedulerSettings
 from deepbot.security import DefenderSettings, PromptInjectionDefender
 
 
@@ -31,6 +32,9 @@ def main() -> None:
         runtime=runtime,
         fallback_message=config.bot_fallback_message,
         processing_message=config.bot_processing_message,
+        cron_jobs_dir=config.cron_jobs_dir if config.cron_enabled else None,
+        cron_default_timezone=config.cron_default_timezone,
+        cron_busy_message=config.cron_busy_message,
         defender=PromptInjectionDefender(
             DefenderSettings(
                 enabled=config.defender_enabled,
@@ -50,8 +54,18 @@ def main() -> None:
         ),
         allowed_attachment_hosts=config.attachment_allowed_hosts,
     )
+    scheduler = SchedulerEngine(
+        settings=SchedulerSettings(
+            enabled=config.cron_enabled,
+            jobs_dir=config.cron_jobs_dir,
+            default_timezone=config.cron_default_timezone,
+            poll_seconds=config.cron_poll_seconds,
+        ),
+        run_job=processor.run_scheduled_job,
+    )
     client = DeepbotClientFactory.create(
         processor=processor,
+        scheduler=scheduler,
         auto_thread_enabled=config.auto_thread_enabled,
         auto_thread_mode=config.auto_thread_mode,
         auto_thread_channel_ids=config.auto_thread_channel_ids,

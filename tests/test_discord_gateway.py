@@ -1335,6 +1335,29 @@ def test_should_auto_thread_for_message_keyword_mode() -> None:
     )
 
 
+def test_should_auto_thread_for_message_keyword_mode_with_natural_phrase() -> None:
+    envelope = MessageEnvelope(
+        message_id="1",
+        content="この件、スレッドを作って",
+        author_id="u1",
+        author_is_bot=False,
+        guild_id="g1",
+        channel_id="c1",
+        thread_id=None,
+        attachments=(),
+    )
+    assert (
+        DeepbotClientFactory._should_auto_thread_for_message(
+            envelope,
+            enabled=True,
+            mode="keyword",
+            channel_ids=(),
+            trigger_keywords=("スレッド立てて",),
+        )
+        is True
+    )
+
+
 def test_build_thread_title_from_reply() -> None:
     title = DeepbotClientFactory._build_thread_title_from_reply(
         "## 重大脆弱性まとめ\n- CVE-2026-25253: ...",

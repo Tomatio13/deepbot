@@ -194,3 +194,11 @@ def load_mcp_tool_providers() -> list[Any]:
         providers.append(SafeMCPClient(client, name=server_name))
         logger.info("Loaded MCP server: %s", server_name)
     return providers
+
+
+def list_configured_mcp_servers() -> tuple[str, ...]:
+    config_path = _resolve_mcp_config_path()
+    servers = _load_mcp_servers(config_path)
+    if not servers:
+        return ()
+    return tuple(sorted(servers.keys()))

@@ -27,6 +27,9 @@ class AgentRequest:
     image_attachments: tuple["ImageAttachment", ...] = ()
     progress_callback: Callable[[str], Awaitable[None]] | None = None
     tool_event_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    enabled_skills: tuple[str, ...] = ()
+    allowed_mcp_servers: tuple[str, ...] = ()
+    allowed_mcp_tools: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -222,7 +225,12 @@ class AgentRuntime:
     @staticmethod
     def _build_prompt(request: AgentRequest) -> str:
         context = [dict(m) for m in request.context]
-        skills = list_skills()
+        all_skills = list_skills()
+        if request.enabled_skills:
+            enabled = set(request.enabled_skills)
+            skills = [skill for skill in all_skills if skill.name in enabled]
+        else:
+            skills = all_skills
         selected_skill_prompt: str | None = None
         skills_discovery_prompt = build_skills_discovery_prompt(skills)
 
@@ -239,6 +247,18 @@ class AgentRuntime:
             "Prefer tool-based answers over memory for time-sensitive topics.",
             f"Session ID: {request.session_id}",
         ]
+        if request.allowed_mcp_servers:
+            lines.append(
+                "Allowed MCP servers for this run: "
+                + ", ".join(request.allowed_mcp_servers)
+            )
+        if request.allowed_mcp_tools:
+            lines.append(
+                "Allowed MCP tools for this run: "
+                + ", ".join(request.allowed_mcp_tools)
+            )
+        if request.allowed_mcp_servers or request.allowed_mcp_tools:
+            lines.append("Use only the MCP servers/tools listed above for this run.")
         if skills_discovery_prompt:
             lines.extend(["", skills_discovery_prompt])
         if selected_skill_prompt:

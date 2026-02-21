@@ -245,4 +245,8 @@ def create_audit_logger() -> AuditLogger | None:
     )
     suffix = uuid.uuid4().hex
     filename = f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{suffix}.jsonl"
-    return AuditLogger(sessions_dir / filename)
+    try:
+        return AuditLogger(sessions_dir / filename)
+    except Exception:
+        # Never fail bot runtime when transcript directory is unavailable.
+        return None

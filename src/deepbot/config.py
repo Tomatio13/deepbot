@@ -55,6 +55,11 @@ class AppConfig:
     defender_warn_threshold: float
     defender_sanitize_mode: str
     attachment_allowed_hosts: tuple[str, ...]
+    cron_enabled: bool
+    cron_jobs_dir: Path
+    cron_default_timezone: str
+    cron_poll_seconds: int
+    cron_busy_message: str
 
 
 @dataclass(frozen=True)
@@ -96,6 +101,11 @@ def _resolve_agent_md_path() -> Path:
     dotenv_path = dotenv.find_dotenv(usecwd=True)
     base_dir = Path(dotenv_path).resolve().parent if dotenv_path else Path.cwd().resolve()
     return base_dir / "AGENT.md"
+
+
+def _resolve_config_dir() -> Path:
+    config_dir = os.environ.get("DEEPBOT_CONFIG_DIR", "/app/config").strip() or "/app/config"
+    return Path(config_dir).expanduser()
 
 
 def load_config() -> AppConfig:
@@ -220,6 +230,19 @@ def load_config() -> AppConfig:
     if not attachment_allowed_hosts:
         raise ConfigError("ATTACHMENT_ALLOWED_HOSTS must include at least one host")
 
+    cron_jobs_dir_raw = os.environ.get("CRON_JOBS_DIR", "").strip()
+    cron_jobs_dir = (
+        Path(cron_jobs_dir_raw).expanduser()
+        if cron_jobs_dir_raw
+        else Path("/workspace/jobs")
+    )
+    cron_default_timezone = (
+        os.environ.get("CRON_DEFAULT_TIMEZONE", "Asia/Tokyo").strip() or "Asia/Tokyo"
+    )
+    cron_poll_seconds = int(os.environ.get("CRON_POLL_SECONDS", "15"))
+    if cron_poll_seconds <= 0:
+        raise ConfigError("CRON_POLL_SECONDS must be > 0")
+
     return AppConfig(
         discord_bot_token=token,
         strands_model_provider=provider,
@@ -275,6 +298,15 @@ def load_config() -> AppConfig:
         defender_warn_threshold=defender_warn_threshold,
         defender_sanitize_mode=defender_sanitize_mode,
         attachment_allowed_hosts=attachment_allowed_hosts,
+        cron_enabled=_parse_bool(os.environ.get("CRON_ENABLED"), default=True),
+        cron_jobs_dir=cron_jobs_dir,
+        cron_default_timezone=cron_default_timezone,
+        cron_poll_seconds=cron_poll_seconds,
+        cron_busy_message=os.environ.get(
+            "CRON_BUSY_MESSAGE",
+            "いま定期ジョブを実行中です。完了後に順番に対応します。",
+        ).strip()
+        or "いま定期ジョブを実行中です。完了後に順番に対応します。",
     )
 
 
