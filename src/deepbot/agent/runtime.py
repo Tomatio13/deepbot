@@ -624,7 +624,7 @@ def _apply_tool_guardrails(tool_obj: Any, *, tool_name: str, config: AppConfig) 
             denied_prefixes=config.shell_deny_path_prefixes,
         )
     if tool_name == "file_read":
-        return _build_guarded_file_read_tool(allowed_roots=config.tool_write_roots)
+        return _build_guarded_file_read_tool(allowed_roots=config.tool_read_roots)
     if tool_name == "file_write":
         return _build_guarded_file_write_tool(allowed_roots=config.tool_write_roots)
     if tool_name == "editor":

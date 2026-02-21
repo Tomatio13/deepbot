@@ -41,6 +41,7 @@ class AppConfig:
     shell_srt_enforced: bool
     shell_srt_settings_path: str
     shell_deny_path_prefixes: tuple[str, ...]
+    tool_read_roots: tuple[str, ...]
     tool_write_roots: tuple[str, ...]
     auth_passphrase: str
     auth_required: bool
@@ -166,8 +167,19 @@ def load_config() -> AppConfig:
         os.environ.get("SHELL_SRT_SETTINGS_PATH", "/app/config/srt-settings.json").strip()
         or "/app/config/srt-settings.json"
     )
-    shell_deny_path_prefixes = _parse_csv(os.environ.get("SHELL_DENY_PATH_PREFIXES", "/app"))
+    shell_deny_path_prefixes = _parse_csv(
+        os.environ.get(
+            "SHELL_DENY_PATH_PREFIXES",
+            "/app/.env,/app/.git,/app/config/AGENT.md,/app/config/mcp.json,/root/.ssh,/root/.gnupg,/root/.aws,/workspace/config/skills/nature-remo-skill/.env,/workspace/agent-memory/memory",
+        )
+    )
     tool_write_roots = _parse_csv(os.environ.get("TOOL_WRITE_ROOTS", "/workspace"))
+    tool_read_roots = _parse_csv(
+        os.environ.get(
+            "TOOL_READ_ROOTS",
+            ",".join([*tool_write_roots, "/app/config/skills"]),
+        )
+    )
     auth_required = _parse_bool(os.environ.get("AUTH_REQUIRED"), default=True)
     auth_idle_timeout_minutes = int(os.environ.get("AUTH_IDLE_TIMEOUT_MINUTES", "15"))
     auth_window_minutes = int(os.environ.get("AUTH_WINDOW_MINUTES", "10"))
@@ -200,6 +212,10 @@ def load_config() -> AppConfig:
         raise ConfigError("TOOL_WRITE_ROOTS must include at least one root path")
     if any(not root.startswith("/") for root in tool_write_roots):
         raise ConfigError("TOOL_WRITE_ROOTS must contain absolute paths")
+    if not tool_read_roots:
+        raise ConfigError("TOOL_READ_ROOTS must include at least one root path")
+    if any(not root.startswith("/") for root in tool_read_roots):
+        raise ConfigError("TOOL_READ_ROOTS must contain absolute paths")
     if auth_required and not auth_passphrase:
         raise ConfigError("AUTH_PASSPHRASE is required when AUTH_REQUIRED=true")
     if auth_window_minutes <= 0:
@@ -284,6 +300,7 @@ def load_config() -> AppConfig:
         shell_srt_enforced=shell_srt_enforced,
         shell_srt_settings_path=shell_srt_settings_path,
         shell_deny_path_prefixes=shell_deny_path_prefixes,
+        tool_read_roots=tool_read_roots,
         tool_write_roots=tool_write_roots,
         auth_passphrase=auth_passphrase,
         auth_required=auth_required,

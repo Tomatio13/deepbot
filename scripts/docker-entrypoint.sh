@@ -19,4 +19,14 @@ if [ "$#" -eq 0 ]; then
   set -- deepbot
 fi
 
+workspace_dir="${WORKSPACE_DIR:-/workspace}"
+bot_rw_dir="${BOT_RW_DIR:-$workspace_dir}"
+agent_memory_dir="${AGENT_MEMORY_DIR:-$bot_rw_dir/agent-memory/memory}"
+transcript_dir="${DEEPBOT_TRANSCRIPT_DIR:-$bot_rw_dir/transcripts}"
+cron_jobs_dir="${CRON_JOBS_DIR:-$bot_rw_dir/jobs}"
+
+for dir in "$workspace_dir" "$bot_rw_dir" "$agent_memory_dir" "$transcript_dir" "$cron_jobs_dir"; do
+  mkdir -p "$dir"
+done
+
 exec "$@"

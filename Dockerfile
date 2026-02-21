@@ -8,7 +8,7 @@ WORKDIR /app
 COPY . /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm bubblewrap ripgrep socat \
+    && apt-get install -y --no-install-recommends nodejs npm bubblewrap ripgrep socat curl wget\
     && npm install -g @anthropic-ai/sandbox-runtime \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*

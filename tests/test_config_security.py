@@ -66,6 +66,16 @@ def test_config_rejects_relative_tool_write_roots(monkeypatch: pytest.MonkeyPatc
         load_config()
 
 
+def test_config_rejects_relative_tool_read_roots(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("TOOL_READ_ROOTS", "workspace")
+
+    with pytest.raises(ConfigError, match="TOOL_READ_ROOTS"):
+        load_config()
+
+
 def test_config_rejects_relative_shell_deny_prefixes(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_base_env(monkeypatch)
     monkeypatch.setenv("AUTH_REQUIRED", "false")
