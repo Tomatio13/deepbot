@@ -124,6 +124,58 @@ docker compose up -d --build
 - `DEFENDER_*` (prompt-injection defense)
 - `ATTACHMENT_ALLOWED_HOSTS` (remote attachment allowlist)
 
+### 3.1 Scheduled Jobs (Cron-like)
+- `CRON_ENABLED=true`
+- `CRON_JOBS_DIR=/workspace/jobs` (must be writable)
+- `CRON_DEFAULT_TIMEZONE=Asia/Tokyo`
+- `CRON_POLL_SECONDS=15`
+- `CRON_BUSY_MESSAGE`
+
+### 3.2 Scheduled Job Commands (Multilingual Aliases)
+Scheduled job commands are normalized to internal command IDs (`job_create`, `job_list`, `job_pause`, `job_resume`, `job_delete`, `job_run_now`).
+This means users can operate jobs with either Japanese or English command labels.
+
+- `job_create`
+  - `/定期登録`
+  - `/schedule`, `/job-create`, `/cron-register`, `/schedule register`
+- `job_list`
+  - `/定期一覧`
+  - `/schedule-list`, `/job-list`, `/cron-list`, `/schedule list`
+- `job_pause`
+  - `/定期停止 <job-id>`
+  - `/schedule-pause <job-id>`, `/job-pause <job-id>`, `/cron-pause <job-id>`, `/schedule pause <job-id>`
+- `job_resume`
+  - `/定期再開 <job-id>`
+  - `/schedule-resume <job-id>`, `/job-resume <job-id>`, `/cron-resume <job-id>`, `/schedule resume <job-id>`
+- `job_delete`
+  - `/定期削除 <job-id>`
+  - `/schedule-delete <job-id>`, `/job-delete <job-id>`, `/cron-delete <job-id>`, `/schedule delete <job-id>`
+- `job_run_now`
+  - `/定期今すぐ実行 <job-id>`
+  - `/schedule-run-now <job-id>`, `/job-run-now <job-id>`, `/cron-run-now <job-id>`, `/schedule run-now <job-id>`
+
+Examples:
+```text
+/定期登録 プロンプト="今日の天気をまとめて" 頻度="平日 7:00"
+/schedule prompt="Post weather summary" schedule="毎時"
+/定期一覧
+/schedule list
+/定期停止 job-20260221-070000
+/schedule resume job-20260221-070000
+/schedule delete job-20260221-070000
+/schedule run-now job-20260221-070000
+```
+
+Registration argument keys (both supported):
+- Prompt key: `プロンプト` or `prompt`
+- Schedule key: `頻度` or `schedule`
+- Timezone key: `タイムゾーン` or `timezone`
+
+Current supported schedule text:
+- `毎時`
+- `毎日 HH:MM`
+- `平日 HH:MM`
+
 ### 4. Dangerous Tool Controls (Advanced)
 - `DANGEROUS_TOOLS_ENABLED=false` (recommended default)
 - `ENABLED_DANGEROUS_TOOLS`

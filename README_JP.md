@@ -124,6 +124,58 @@ docker compose up -d --build
 - `DEFENDER_*`: プロンプトインジェクション防御設定
 - `ATTACHMENT_ALLOWED_HOSTS`: 添付画像取得先ホストの許可リスト
 
+### 3.1 定期ジョブ設定（cron風）
+- `CRON_ENABLED=true`
+- `CRON_JOBS_DIR=/workspace/jobs`（書き込み可能なパスが必須）
+- `CRON_DEFAULT_TIMEZONE=Asia/Tokyo`
+- `CRON_POLL_SECONDS=15`
+- `CRON_BUSY_MESSAGE`
+
+### 3.2 定期ジョブコマンド（多言語エイリアス）
+定期ジョブのコマンドは内部的にコマンドID（`job_create`, `job_list`, `job_pause`, `job_resume`, `job_delete`, `job_run_now`）へ正規化されます。  
+そのため、**日本語ラベルでも英語ラベルでも同じ処理**で実行されます。
+
+- `job_create`
+  - `/定期登録`
+  - `/schedule`, `/job-create`, `/cron-register`, `/schedule register`
+- `job_list`
+  - `/定期一覧`
+  - `/schedule-list`, `/job-list`, `/cron-list`, `/schedule list`
+- `job_pause`
+  - `/定期停止 <job-id>`
+  - `/schedule-pause <job-id>`, `/job-pause <job-id>`, `/cron-pause <job-id>`, `/schedule pause <job-id>`
+- `job_resume`
+  - `/定期再開 <job-id>`
+  - `/schedule-resume <job-id>`, `/job-resume <job-id>`, `/cron-resume <job-id>`, `/schedule resume <job-id>`
+- `job_delete`
+  - `/定期削除 <job-id>`
+  - `/schedule-delete <job-id>`, `/job-delete <job-id>`, `/cron-delete <job-id>`, `/schedule delete <job-id>`
+- `job_run_now`
+  - `/定期今すぐ実行 <job-id>`
+  - `/schedule-run-now <job-id>`, `/job-run-now <job-id>`, `/cron-run-now <job-id>`, `/schedule run-now <job-id>`
+
+実行例:
+```text
+/定期登録 プロンプト="今日の天気をまとめて" 頻度="平日 7:00"
+/schedule prompt="Post weather summary" schedule="毎時"
+/定期一覧
+/schedule list
+/定期停止 job-20260221-070000
+/schedule resume job-20260221-070000
+/schedule delete job-20260221-070000
+/schedule run-now job-20260221-070000
+```
+
+登録時の引数キー（どちらでも可）:
+- プロンプト: `プロンプト` または `prompt`
+- 頻度: `頻度` または `schedule`
+- タイムゾーン: `タイムゾーン` または `timezone`
+
+現在サポートされる頻度書式:
+- `毎時`
+- `毎日 HH:MM`
+- `平日 HH:MM`
+
 ### 4. 危険ツール設定（変更時のみ）
 - `DANGEROUS_TOOLS_ENABLED=false`: 通常は `false` 推奨
 - `ENABLED_DANGEROUS_TOOLS`: 有効化する危険ツールの許可リスト

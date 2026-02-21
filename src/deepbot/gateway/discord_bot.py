@@ -11,6 +11,7 @@ import socket
 import time
 import urllib.request
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import urlparse
@@ -18,6 +19,16 @@ from urllib.parse import urlparse
 from deepbot.agent.runtime import AgentRequest, AgentRuntime, ImageAttachment
 from deepbot.audit_log import AuditLogger, create_audit_logger
 from deepbot.memory.session_store import SessionStore
+from deepbot.scheduler import (
+    JobDefinition,
+    JobFormatError,
+    compute_next_run_at,
+    create_job_from_command,
+    find_job,
+    load_jobs,
+    natural_schedule_help,
+    save_job,
+)
 from deepbot.security import DefenderSettings, PromptInjectionDefender
 
 logger = logging.getLogger(__name__)
@@ -133,9 +144,32 @@ class MessageProcessor:
     _MAX_UI_BUTTONS = 3
     _MAX_OUTPUT_IMAGES = 4
     _MAX_A2UI_ENVELOPES = 8
+    _SCHEDULED_RUNNING_DEFAULT_MESSAGE = "いま定期ジョブを実行中です。完了後に順番に対応します。"
     _DATA_BIND_RE = re.compile(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}")
     _IMAGE_MD_RE = re.compile(r"!\[[^\]]*\]\((https?://[^\s)]+)\)", re.IGNORECASE)
     _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
+    _CRON_COMMAND_CANONICAL_PREFIXES: dict[str, str] = {
+        "job_create": "/定期登録",
+        "job_list": "/定期一覧",
+        "job_pause": "/定期停止",
+        "job_resume": "/定期再開",
+        "job_delete": "/定期削除",
+        "job_run_now": "/定期今すぐ実行",
+    }
+    _CRON_COMMAND_ALIASES: dict[str, tuple[str, ...]] = {
+        "job_create": ("/定期登録", "/schedule", "/job-create", "/cron-register", "/schedule register"),
+        "job_list": ("/定期一覧", "/schedule-list", "/job-list", "/cron-list", "/schedule list"),
+        "job_pause": ("/定期停止", "/schedule-pause", "/job-pause", "/cron-pause", "/schedule pause"),
+        "job_resume": ("/定期再開", "/schedule-resume", "/job-resume", "/cron-resume", "/schedule resume"),
+        "job_delete": ("/定期削除", "/schedule-delete", "/job-delete", "/cron-delete", "/schedule delete"),
+        "job_run_now": (
+            "/定期今すぐ実行",
+            "/schedule-run-now",
+            "/job-run-now",
+            "/cron-run-now",
+            "/schedule run-now",
+        ),
+    }
 
     def __init__(
         self,
@@ -150,6 +184,9 @@ class MessageProcessor:
         defender: PromptInjectionDefender | None = None,
         allowed_attachment_hosts: tuple[str, ...] | None = None,
         audit_logger: AuditLogger | None = None,
+        cron_jobs_dir: Path | None = None,
+        cron_default_timezone: str = "Asia/Tokyo",
+        cron_busy_message: str | None = None,
     ) -> None:
         self._store = store
         self._runtime = runtime
@@ -174,6 +211,15 @@ class MessageProcessor:
         self._surface_states: dict[tuple[str, str], _SurfaceState] = {}
         self._auth_lock = asyncio.Lock()
         self._audit_logger = audit_logger if audit_logger is not None else create_audit_logger()
+        self._cron_jobs_dir = cron_jobs_dir
+        self._cron_default_timezone = cron_default_timezone
+        self._cron_busy_message = (
+            (cron_busy_message or "").strip() or self._SCHEDULED_RUNNING_DEFAULT_MESSAGE
+        )
+        self._active_scheduled_runs = 0
+        self._scheduled_run_lock = asyncio.Lock()
+        self._cron_channel_sender: Callable[[str, str], Awaitable[Any]] | None = None
+        self._scheduler_engine: Any = None
 
     def log_gateway_event(
         self,
@@ -785,6 +831,374 @@ class MessageProcessor:
         )
         return None
 
+    def set_cron_channel_sender(self, sender: Callable[[str, str], Awaitable[Any]]) -> None:
+        self._cron_channel_sender = sender
+
+    def bind_scheduler_engine(self, engine: Any) -> None:
+        self._scheduler_engine = engine
+
+    async def _mark_scheduled_run(self, active: bool) -> None:
+        async with self._scheduled_run_lock:
+            if active:
+                self._active_scheduled_runs += 1
+            else:
+                self._active_scheduled_runs = max(0, self._active_scheduled_runs - 1)
+
+    async def _is_scheduled_job_running(self) -> bool:
+        async with self._scheduled_run_lock:
+            return self._active_scheduled_runs > 0
+
+    @staticmethod
+    def _parse_command_key_values(text: str) -> dict[str, str]:
+        pattern = re.compile(r"([^\s=]+)\s*=\s*(\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'|\\S+)")
+        values: dict[str, str] = {}
+        for match in pattern.finditer(text):
+            key = match.group(1).strip()
+            raw_value = match.group(2).strip()
+            if (raw_value.startswith('"') and raw_value.endswith('"')) or (
+                raw_value.startswith("'") and raw_value.endswith("'")
+            ):
+                raw_value = raw_value[1:-1]
+            values[key] = raw_value
+        return values
+
+    @staticmethod
+    def _generate_job_name(now: datetime) -> str:
+        return now.strftime("job-%Y%m%d-%H%M%S")
+
+    @classmethod
+    def _normalize_cron_command(cls, content: str) -> tuple[str, str] | None:
+        text = content.strip()
+        if not text:
+            return None
+        for command_key, aliases in cls._CRON_COMMAND_ALIASES.items():
+            canonical = cls._CRON_COMMAND_CANONICAL_PREFIXES[command_key]
+            for alias in aliases:
+                if text == alias or text.startswith(f"{alias} "):
+                    return command_key, f"{canonical}{text[len(alias):]}"
+        return None
+
+    def _resolve_jobs_dir(self) -> Path | None:
+        return self._cron_jobs_dir
+
+    async def _handle_cron_register_command(
+        self,
+        *,
+        content: str,
+        message: MessageEnvelope,
+        session_id: str,
+        send_reply: Callable[..., Awaitable[Any]],
+    ) -> bool:
+        jobs_dir = self._resolve_jobs_dir()
+        if jobs_dir is None:
+            await self._send_reply_safely(send_reply, "定期ジョブ機能は無効です。", session_id=session_id)
+            return True
+
+        args_text = content[len("/定期登録"):].strip()
+        kv = self._parse_command_key_values(args_text)
+        prompt = kv.get("プロンプト") or kv.get("prompt") or ""
+        schedule = kv.get("頻度") or kv.get("schedule") or ""
+        timezone_name = kv.get("タイムゾーン") or kv.get("timezone") or self._cron_default_timezone
+
+        if not prompt or not schedule:
+            await self._send_reply_safely(
+                send_reply,
+                (
+                    "使い方: `/定期登録 プロンプト=\"...\" 頻度=\"毎時|毎日 7:00|平日 7:00\"`\\n"
+                    + natural_schedule_help()
+                ),
+                session_id=session_id,
+            )
+            return True
+
+        try:
+            job = create_job_from_command(
+                jobs_dir=jobs_dir,
+                name=self._generate_job_name(datetime.now(timezone.utc)),
+                description=prompt[:40],
+                prompt=prompt,
+                schedule=schedule,
+                timezone_name=timezone_name,
+                created_by=message.author_id,
+                created_channel_id=message.channel_id,
+            )
+            save_job(job)
+        except JobFormatError as exc:
+            await self._send_reply_safely(
+                send_reply,
+                f"登録に失敗しました: {exc}\\n{natural_schedule_help()}",
+                session_id=session_id,
+            )
+            return True
+        except Exception as exc:
+            logger.exception("Failed to register scheduled job: %s", exc)
+            if isinstance(exc, OSError) and exc.errno == 30:
+                await self._send_reply_safely(
+                    send_reply,
+                    "登録先が読み取り専用です。`CRON_JOBS_DIR` を書き込み可能なパス（例: `/workspace/jobs`）に設定してください。",
+                    session_id=session_id,
+                )
+                return True
+            await self._send_reply_safely(
+                send_reply,
+                f"登録に失敗しました: {exc}",
+                session_id=session_id,
+            )
+            return True
+
+        await self._send_reply_safely(
+            send_reply,
+            (
+                f"定期ジョブを登録しました。\\n- ID: `{job.name}`\\n- 頻度: {job.schedule}\\n"
+                f"- タイムゾーン: {job.timezone}\\n- 送信先: 作成元チャンネル"
+            ),
+            session_id=session_id,
+        )
+        return True
+
+    async def _handle_cron_list_command(
+        self,
+        *,
+        session_id: str,
+        send_reply: Callable[..., Awaitable[Any]],
+    ) -> bool:
+        jobs_dir = self._resolve_jobs_dir()
+        if jobs_dir is None:
+            await self._send_reply_safely(send_reply, "定期ジョブ機能は無効です。", session_id=session_id)
+            return True
+        jobs, errors = load_jobs(jobs_dir, default_timezone=self._cron_default_timezone)
+        lines: list[str] = ["定期ジョブ一覧:"]
+        for err in errors:
+            lines.append(f"- [error] {err}")
+        if not jobs:
+            lines.append("- 登録はありません。")
+            await self._send_reply_safely(send_reply, "\n".join(lines), session_id=session_id)
+            return True
+        for job in jobs:
+            status = "enabled" if job.enabled else "disabled"
+            next_run = (
+                job.next_run_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                if job.next_run_at
+                else "-"
+            )
+            invalid = f" (invalid: {job.invalid_reason})" if job.invalid_reason else ""
+            lines.append(
+                f"- `{job.name}` {status} / {job.schedule} / next={next_run}{invalid}"
+            )
+        await self._send_reply_safely(send_reply, "\n".join(lines), session_id=session_id)
+        return True
+
+    async def _handle_cron_state_command(
+        self,
+        *,
+        content: str,
+        session_id: str,
+        send_reply: Callable[..., Awaitable[Any]],
+        enable: bool,
+    ) -> bool:
+        jobs_dir = self._resolve_jobs_dir()
+        if jobs_dir is None:
+            await self._send_reply_safely(send_reply, "定期ジョブ機能は無効です。", session_id=session_id)
+            return True
+        parts = content.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await self._send_reply_safely(
+                send_reply,
+                "ジョブIDを指定してください。",
+                session_id=session_id,
+            )
+            return True
+        target = parts[1].strip()
+        jobs, _ = load_jobs(jobs_dir, default_timezone=self._cron_default_timezone)
+        job = find_job(jobs, target)
+        if job is None:
+            await self._send_reply_safely(
+                send_reply,
+                f"ジョブが見つかりません: {target}",
+                session_id=session_id,
+            )
+            return True
+        job.enabled = enable
+        if enable:
+            job.next_run_at = compute_next_run_at(
+                schedule=job.schedule,
+                timezone_name=job.timezone,
+            )
+        save_job(job)
+        action = "再開" if enable else "停止"
+        await self._send_reply_safely(
+            send_reply,
+            f"ジョブを{action}しました: `{job.name}`",
+            session_id=session_id,
+        )
+        return True
+
+    async def _handle_cron_run_now_command(
+        self,
+        *,
+        content: str,
+        session_id: str,
+        send_reply: Callable[..., Awaitable[Any]],
+    ) -> bool:
+        if self._scheduler_engine is None:
+            await self._send_reply_safely(
+                send_reply,
+                "スケジューラが起動していません。",
+                session_id=session_id,
+            )
+            return True
+        parts = content.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await self._send_reply_safely(send_reply, "ジョブIDを指定してください。", session_id=session_id)
+            return True
+        name = parts[1].strip()
+        ok, message = await self._scheduler_engine.run_job_now(name)
+        await self._send_reply_safely(send_reply, message, session_id=session_id)
+        return ok
+
+    async def _handle_cron_delete_command(
+        self,
+        *,
+        content: str,
+        session_id: str,
+        send_reply: Callable[..., Awaitable[Any]],
+    ) -> bool:
+        jobs_dir = self._resolve_jobs_dir()
+        if jobs_dir is None:
+            await self._send_reply_safely(send_reply, "定期ジョブ機能は無効です。", session_id=session_id)
+            return True
+        parts = content.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await self._send_reply_safely(send_reply, "ジョブIDを指定してください。", session_id=session_id)
+            return True
+        target = parts[1].strip()
+        jobs, _ = load_jobs(jobs_dir, default_timezone=self._cron_default_timezone)
+        job = find_job(jobs, target)
+        if job is None:
+            await self._send_reply_safely(
+                send_reply,
+                f"ジョブが見つかりません: {target}",
+                session_id=session_id,
+            )
+            return True
+        try:
+            job.path.unlink(missing_ok=False)
+        except OSError as exc:
+            if exc.errno == 30:
+                await self._send_reply_safely(
+                    send_reply,
+                    "削除先が読み取り専用です。`CRON_JOBS_DIR` を書き込み可能なパス（例: `/workspace/jobs`）に設定してください。",
+                    session_id=session_id,
+                )
+                return True
+            await self._send_reply_safely(
+                send_reply,
+                f"削除に失敗しました: {exc}",
+                session_id=session_id,
+            )
+            return True
+        await self._send_reply_safely(
+            send_reply,
+            f"ジョブを削除しました: `{job.name}`",
+            session_id=session_id,
+        )
+        return True
+
+    async def _try_handle_cron_command(
+        self,
+        *,
+        content: str,
+        message: MessageEnvelope,
+        session_id: str,
+        send_reply: Callable[..., Awaitable[Any]],
+    ) -> bool:
+        normalized = self._normalize_cron_command(content)
+        if normalized is None:
+            return False
+        command_key, normalized_content = normalized
+        if command_key == "job_create":
+            return await self._handle_cron_register_command(
+                content=normalized_content,
+                message=message,
+                session_id=session_id,
+                send_reply=send_reply,
+            )
+        if command_key == "job_list":
+            return await self._handle_cron_list_command(
+                session_id=session_id,
+                send_reply=send_reply,
+            )
+        if command_key == "job_pause":
+            return await self._handle_cron_state_command(
+                content=normalized_content,
+                session_id=session_id,
+                send_reply=send_reply,
+                enable=False,
+            )
+        if command_key == "job_resume":
+            return await self._handle_cron_state_command(
+                content=normalized_content,
+                session_id=session_id,
+                send_reply=send_reply,
+                enable=True,
+            )
+        if command_key == "job_delete":
+            return await self._handle_cron_delete_command(
+                content=normalized_content,
+                session_id=session_id,
+                send_reply=send_reply,
+            )
+        if command_key == "job_run_now":
+            await self._handle_cron_run_now_command(
+                content=normalized_content,
+                session_id=session_id,
+                send_reply=send_reply,
+            )
+            return True
+        return False
+
+    async def run_scheduled_job(self, job: JobDefinition) -> str:
+        session_id = f"cron:{job.name}" if job.mode == "isolated" else "cron:main"
+        await self._mark_scheduled_run(True)
+        try:
+            prompt = job.build_execution_prompt()
+            context = [{"role": "user", "content": prompt}]
+            reply = await self._runtime.generate_reply(
+                AgentRequest(
+                    session_id=session_id,
+                    context=context,
+                    image_attachments=(),
+                    enabled_skills=job.skills,
+                    allowed_mcp_servers=job.mcp_servers,
+                    allowed_mcp_tools=job.mcp_tools,
+                )
+            )
+            structured = self._structured_reply_from_text(reply, session_id=session_id)
+            if not structured.markdown:
+                structured = StructuredReply(markdown=self._fallback_message)
+            await self._store.append(
+                session_id,
+                role="user",
+                content=prompt,
+                author_id=job.created_by or "scheduler",
+            )
+            await self._store.append(
+                session_id,
+                role="assistant",
+                content=structured.markdown,
+                author_id="deepbot",
+            )
+            if job.delivery == "announce":
+                target_channel = job.channel
+                if target_channel == "auto":
+                    target_channel = job.created_channel_id or ""
+                if target_channel and self._cron_channel_sender is not None:
+                    text = f"[定期ジョブ: {job.name}]\n{structured.markdown}"
+                    await self._cron_channel_sender(target_channel, text)
+            return structured.markdown
+        finally:
+            await self._mark_scheduled_run(False)
+
     def _extract_auth_attempt(self, content: str) -> str | None:
         command = self._auth_config.auth_command
         if not command:
@@ -1222,6 +1636,22 @@ class MessageProcessor:
             )
             await self._send_reply_safely(send_reply, auth_prompt, session_id=session_id)
             return
+
+        if await self._try_handle_cron_command(
+            content=content,
+            message=message,
+            session_id=session_id,
+            send_reply=send_reply,
+        ):
+            await self._mark_activity(session_id, now)
+            return
+
+        if await self._is_scheduled_job_running():
+            await self._send_reply_safely(
+                send_reply,
+                self._cron_busy_message,
+                session_id=session_id,
+            )
 
         agent_memory_query = self._extract_agent_memory_query(content)
         image_attachments = await self._image_loader(message.attachments)
@@ -1662,6 +2092,10 @@ class DeepbotClientFactory:
         re.compile(r"^\s*>+\s*"),
         re.compile(r"^\s*`+"),
     )
+    _THREAD_REQUEST_HINT_RE = re.compile(
+        r"(?:スレッド.*(?:立てて|作って|作成)|(?:^|[\s　])(?:/thread)(?:[\s　]|$))",
+        re.IGNORECASE,
+    )
 
     @staticmethod
     def _gateway_error_payload(exc: Exception) -> dict[str, Any]:
@@ -1710,7 +2144,9 @@ class DeepbotClientFactory:
         normalized = envelope.content.strip().lower()
         if not normalized:
             return False
-        return any(keyword in normalized for keyword in trigger_keywords if keyword)
+        if any(keyword in normalized for keyword in trigger_keywords if keyword):
+            return True
+        return bool(DeepbotClientFactory._THREAD_REQUEST_HINT_RE.search(normalized))
 
     @staticmethod
     def _auto_thread_name(message: Any) -> str:
@@ -2345,6 +2781,7 @@ class DeepbotClientFactory:
     def create(
         *,
         processor: MessageProcessor,
+        scheduler: Any | None = None,
         auto_thread_enabled: bool = False,
         auto_thread_mode: str = "keyword",
         auto_thread_channel_ids: tuple[str, ...] = (),
@@ -2362,6 +2799,23 @@ class DeepbotClientFactory:
         class DeepbotClient(discord.Client):
             async def on_ready(self) -> None:
                 logger.info("Deepbot logged in as %s", self.user)
+                if scheduler is not None:
+                    scheduler.start()
+
+                async def _send_to_channel_id(channel_id: str, text: str) -> Any:
+                    channel_obj = self.get_channel(int(channel_id))
+                    if channel_obj is None:
+                        channel_obj = await self.fetch_channel(int(channel_id))
+                    return await channel_obj.send(text)
+
+                processor.set_cron_channel_sender(_send_to_channel_id)
+                if scheduler is not None:
+                    processor.bind_scheduler_engine(scheduler)
+
+            async def close(self) -> None:
+                if scheduler is not None:
+                    await scheduler.stop()
+                await super().close()
 
             async def on_message(self, message: Any) -> None:
                 envelope = await _to_envelope(message)
