@@ -33,6 +33,26 @@ services:
       - ./workspace/gogcli:/root/.config/gogcli
     restart: unless-stopped
 
+  claude-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.claude-runner
+    image: deepbot-claude-runner:latest
+    container_name: deepbot-claude-runner
+    profiles:
+      - claude-sidecar
+    env_file:
+      - path: .env.claude
+        required: false
+    environment:
+      CLAUDE_RUNNER_WORKDIR: /workspace/bot-rw
+    depends_on:
+      - litellm
+    volumes:
+      - ./workspace:/workspace
+      - ./workspace/claude:/home/node/.claude
+    restart: unless-stopped
+
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
     container_name: deepbot-litellm

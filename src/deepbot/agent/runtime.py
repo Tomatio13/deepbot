@@ -11,6 +11,10 @@ from typing import Any, Awaitable, Callable
 
 from deepbot.config import AppConfig, ConfigError, RuntimeSettings
 from deepbot.mcp_tools import load_mcp_tool_providers
+from deepbot.agent.claude_subagent_tool import (
+    ClaudeSubagentSettings,
+    build_claude_subagent_tool,
+)
 from deepbot.skills import (
     build_selected_skill_prompt,
     build_skills_discovery_prompt,
@@ -422,6 +426,26 @@ def _load_default_tools(config: AppConfig) -> list[Any]:
             logger.warning("Tool unavailable: %s.%s (%s)", module_name, tool_name, exc)
 
     logger.info("Loaded Strands tools: %s", ", ".join(getattr(t, "__name__", str(t)) for t in loaded_tools))
+
+    if config.claude_subagent_enabled:
+        try:
+            loaded_tools.append(
+                build_claude_subagent_tool(
+                    ClaudeSubagentSettings(
+                        command=config.claude_subagent_command,
+                        workdir=config.claude_subagent_workdir,
+                        timeout_seconds=config.claude_subagent_timeout_seconds,
+                        model=config.claude_subagent_model,
+                        skip_permissions=config.claude_subagent_skip_permissions,
+                        transport=config.claude_subagent_transport,
+                        sidecar_url=config.claude_subagent_sidecar_url,
+                        sidecar_token=config.claude_subagent_sidecar_token,
+                    )
+                )
+            )
+            logger.info("Loaded optional tool: claude_subagent")
+        except Exception as exc:
+            logger.warning("Failed to load optional claude_subagent tool: %s", exc)
 
     mcp_providers = load_mcp_tool_providers()
     if mcp_providers:

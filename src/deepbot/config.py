@@ -61,6 +61,15 @@ class AppConfig:
     cron_default_timezone: str
     cron_poll_seconds: int
     cron_busy_message: str
+    claude_subagent_enabled: bool
+    claude_subagent_command: str
+    claude_subagent_workdir: str
+    claude_subagent_timeout_seconds: int
+    claude_subagent_model: str | None
+    claude_subagent_skip_permissions: bool
+    claude_subagent_transport: str
+    claude_subagent_sidecar_url: str
+    claude_subagent_sidecar_token: str
 
 
 @dataclass(frozen=True)
@@ -258,6 +267,53 @@ def load_config() -> AppConfig:
     cron_poll_seconds = int(os.environ.get("CRON_POLL_SECONDS", "15"))
     if cron_poll_seconds <= 0:
         raise ConfigError("CRON_POLL_SECONDS must be > 0")
+    claude_subagent_enabled = _parse_bool(
+        os.environ.get("CLAUDE_SUBAGENT_ENABLED"),
+        default=False,
+    )
+    claude_subagent_command = (
+        os.environ.get("CLAUDE_SUBAGENT_COMMAND", "claude").strip() or "claude"
+    )
+    claude_subagent_workdir = (
+        os.environ.get("CLAUDE_SUBAGENT_WORKDIR", "/workspace/bot-rw").strip()
+        or "/workspace/bot-rw"
+    )
+    claude_subagent_timeout_seconds = int(
+        os.environ.get("CLAUDE_SUBAGENT_TIMEOUT_SECONDS", "300")
+    )
+    claude_subagent_model = (
+        os.environ.get("CLAUDE_SUBAGENT_MODEL", "").strip() or None
+    )
+    claude_subagent_skip_permissions = _parse_bool(
+        os.environ.get("CLAUDE_SUBAGENT_SKIP_PERMISSIONS"),
+        default=False,
+    )
+    claude_subagent_transport = (
+        os.environ.get("CLAUDE_SUBAGENT_TRANSPORT", "direct").strip().lower() or "direct"
+    )
+    claude_subagent_sidecar_url = (
+        os.environ.get("CLAUDE_SUBAGENT_SIDECAR_URL", "http://claude-runner:8787/v1/run").strip()
+        or "http://claude-runner:8787/v1/run"
+    )
+    claude_subagent_sidecar_token = os.environ.get("CLAUDE_SUBAGENT_SIDECAR_TOKEN", "").strip()
+    if claude_subagent_timeout_seconds <= 0:
+        raise ConfigError("CLAUDE_SUBAGENT_TIMEOUT_SECONDS must be > 0")
+    if not claude_subagent_workdir.startswith("/"):
+        raise ConfigError("CLAUDE_SUBAGENT_WORKDIR must be an absolute path")
+    if any(ch.isspace() for ch in claude_subagent_command):
+        raise ConfigError(
+            "CLAUDE_SUBAGENT_COMMAND must be a single executable path/name without spaces"
+        )
+    if claude_subagent_transport not in {"direct", "sidecar"}:
+        raise ConfigError("CLAUDE_SUBAGENT_TRANSPORT must be one of: direct, sidecar")
+    if claude_subagent_transport == "sidecar":
+        if not (
+            claude_subagent_sidecar_url.startswith("http://")
+            or claude_subagent_sidecar_url.startswith("https://")
+        ):
+            raise ConfigError(
+                "CLAUDE_SUBAGENT_SIDECAR_URL must start with http:// or https://"
+            )
 
     return AppConfig(
         discord_bot_token=token,
@@ -324,6 +380,15 @@ def load_config() -> AppConfig:
             "いま定期ジョブを実行中です。完了後に順番に対応します。",
         ).strip()
         or "いま定期ジョブを実行中です。完了後に順番に対応します。",
+        claude_subagent_enabled=claude_subagent_enabled,
+        claude_subagent_command=claude_subagent_command,
+        claude_subagent_workdir=claude_subagent_workdir,
+        claude_subagent_timeout_seconds=claude_subagent_timeout_seconds,
+        claude_subagent_model=claude_subagent_model,
+        claude_subagent_skip_permissions=claude_subagent_skip_permissions,
+        claude_subagent_transport=claude_subagent_transport,
+        claude_subagent_sidecar_url=claude_subagent_sidecar_url,
+        claude_subagent_sidecar_token=claude_subagent_sidecar_token,
     )
 
 

@@ -299,3 +299,28 @@ pytest -q
 6. `openai.OpenAIError: api_key must be set`: `.env.deepbot` `OPENAI_API_KEY` is empty
 7. `Invalid model name`: `OPENAI_MODEL_ID` does not match an alias in `config/litellm.yaml`
 8. GLM route fails: use `GLM_API_BASE` (not `GLM_BASE_URL`) in `.env.litellm`
+
+## 🧭 Design Notes
+- `docs/claude-subagent-design.md`: Strands-based `claude` sub-agent integration design
+
+## 🤝 Claude Sub-agent (Optional)
+- Enable in `.env.deepbot`:
+  - `CLAUDE_SUBAGENT_ENABLED=true`
+  - `CLAUDE_SUBAGENT_TRANSPORT=direct` (default) or `sidecar`
+- `direct` mode runs `claude` from deepbot container.
+- `sidecar` mode calls `claude-runner` over HTTP (`CLAUDE_SUBAGENT_SIDECAR_URL`).
+- Keep sidecar credentials in `.env.claude` (separated from `.env.deepbot`).
+
+Run sidecar:
+```bash
+cp .env.claude.example .env.claude
+docker compose --profile claude-sidecar up -d claude-runner
+```
+
+Use via LiteLLM (Claude Code LLM Gateway style):
+- `CLAUDE_SUBAGENT_TRANSPORT=sidecar`
+- In `.env.claude`: `CLAUDE_CODE_ANTHROPIC_BASE_URL=http://litellm:4000`
+- In `.env.claude`: `CLAUDE_CODE_ANTHROPIC_AUTH_TOKEN=<same value as LITELLM_MASTER_KEY>`
+- Set token on both sides:
+  - `.env.deepbot`: `CLAUDE_SUBAGENT_SIDECAR_TOKEN=...`
+  - `.env.claude`: `CLAUDE_RUNNER_TOKEN=...`

@@ -298,3 +298,28 @@ pytest -q
 6. `openai.OpenAIError: api_key must be set`: `.env.deepbot` の `OPENAI_API_KEY` が空
 7. `model=... Invalid model name`: `OPENAI_MODEL_ID` と `config/litellm.yaml` のエイリアス不一致
 8. GLM接続できない: `.env.litellm` の変数名は `GLM_API_BASE`（`GLM_BASE_URL` ではない）
+
+## 🧭 設計メモ
+- `docs/claude-subagent-design.md`: Strands ベースで `claude` サブエージェントを統合する設計
+
+## 🤝 Claude サブエージェント（任意）
+- `.env.deepbot` で有効化:
+  - `CLAUDE_SUBAGENT_ENABLED=true`
+  - `CLAUDE_SUBAGENT_TRANSPORT=direct`（既定）または `sidecar`
+- `direct` は deepbot コンテナ内で `claude` を直接実行
+- `sidecar` は `claude-runner` を HTTP 経由で呼び出し（`CLAUDE_SUBAGENT_SIDECAR_URL`）
+- sidecar の認証系設定は `.env.claude` に分離して管理する
+
+sidecar 起動:
+```bash
+cp .env.claude.example .env.claude
+docker compose --profile claude-sidecar up -d claude-runner
+```
+
+LiteLLM 経由にする場合（Claude Code の LLM Gateway 方式）:
+- `CLAUDE_SUBAGENT_TRANSPORT=sidecar`
+- `.env.claude`: `CLAUDE_CODE_ANTHROPIC_BASE_URL=http://litellm:4000`
+- `.env.claude`: `CLAUDE_CODE_ANTHROPIC_AUTH_TOKEN=<LITELLM_MASTER_KEYと同じ値>`
+- トークンを両側で一致させる:
+  - `.env.deepbot`: `CLAUDE_SUBAGENT_SIDECAR_TOKEN=...`
+  - `.env.claude`: `CLAUDE_RUNNER_TOKEN=...`

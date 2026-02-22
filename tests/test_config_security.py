@@ -157,3 +157,60 @@ def test_config_rejects_invalid_auto_thread_mode(monkeypatch: pytest.MonkeyPatch
 
     with pytest.raises(ConfigError, match="AUTO_THREAD_MODE must be one of"):
         load_config()
+
+
+def test_config_parses_claude_subagent_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("CLAUDE_SUBAGENT_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_SUBAGENT_COMMAND", "claude")
+    monkeypatch.setenv("CLAUDE_SUBAGENT_WORKDIR", "/workspace/bot-rw")
+    monkeypatch.setenv("CLAUDE_SUBAGENT_TIMEOUT_SECONDS", "180")
+    monkeypatch.setenv("CLAUDE_SUBAGENT_MODEL", "sonnet")
+    monkeypatch.setenv("CLAUDE_SUBAGENT_SKIP_PERMISSIONS", "true")
+
+    config = load_config()
+    assert config.claude_subagent_enabled is True
+    assert config.claude_subagent_command == "claude"
+    assert config.claude_subagent_workdir == "/workspace/bot-rw"
+    assert config.claude_subagent_timeout_seconds == 180
+    assert config.claude_subagent_model == "sonnet"
+    assert config.claude_subagent_skip_permissions is True
+
+
+def test_config_rejects_relative_claude_subagent_workdir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("CLAUDE_SUBAGENT_WORKDIR", "workspace")
+
+    with pytest.raises(ConfigError, match="CLAUDE_SUBAGENT_WORKDIR"):
+        load_config()
+
+
+def test_config_rejects_invalid_claude_subagent_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("CLAUDE_SUBAGENT_TRANSPORT", "invalid")
+
+    with pytest.raises(ConfigError, match="CLAUDE_SUBAGENT_TRANSPORT"):
+        load_config()
+
+
+def test_config_requires_http_sidecar_url_when_sidecar_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("CLAUDE_SUBAGENT_TRANSPORT", "sidecar")
+    monkeypatch.setenv("CLAUDE_SUBAGENT_SIDECAR_URL", "claude-runner:8787/v1/run")
+
+    with pytest.raises(ConfigError, match="CLAUDE_SUBAGENT_SIDECAR_URL"):
+        load_config()
