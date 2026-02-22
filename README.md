@@ -210,6 +210,67 @@ description: Document review workflow
 ---
 ```
 
+## 🧰 Using `gog` (Google Workspace CLI)
+`gog` is available via `shell` tool execution; MCP is not required.
+
+### One-time setup
+1. Place OAuth client JSON under `config/gogcli/` (for example `config/gogcli/client_secret_*.json`).
+2. Ensure these env values are set in `.env.deepbot`:
+   - `GOGCLI_KEYRING_BACKEND=file`
+   - `GOG_KEYRING_PASSWORD=<strong-fixed-passphrase>`
+   - `GOG_ACCOUNT=<your-google-email>`
+3. Recreate deepbot container:
+```bash
+docker compose up -d --force-recreate deepbot
+```
+4. Register credentials and authorize once:
+```bash
+docker compose run --rm --no-deps deepbot \
+  gog --client personal auth credentials set /app/config/gogcli/client_secret_xxx.json
+
+docker compose run --rm --no-deps deepbot \
+  gog --client personal auth add you@example.com --manual
+```
+
+### Run examples (through SRT)
+```bash
+docker compose exec deepbot \
+  srt --settings /app/config/srt-settings.json -c "gog --client personal whoami"
+
+docker compose exec deepbot \
+  srt --settings /app/config/srt-settings.json -c "gog --client personal calendar events primary --today --max 20"
+
+docker compose exec deepbot \
+  srt --settings /app/config/srt-settings.json -c "gog --client personal gmail messages search 'in:inbox is:unread' --max 10"
+```
+
+### SRT domain allowlist for Google APIs
+When `shell` is SRT-enforced, Google domains must be allowed in `config/srt-settings.json`.
+At minimum include:
+- `accounts.google.com`
+- `oauth2.googleapis.com`
+- `www.googleapis.com`
+- service APIs you actually use (for example `people.googleapis.com`, `gmail.googleapis.com`, `calendar.googleapis.com`, `drive.googleapis.com`)
+
+### References
+- https://zenn.dev/takna/articles/gog-cli-setup-guide
+- https://github.com/openclaw/openclaw/blob/main/skills/gog/SKILL.md
+
+## ❓ FAQ (`gog`)
+1. `gog: command not found` in `deepbot`
+   - Rebuild image and recreate container:
+   - `docker compose build deepbot && docker compose up -d --force-recreate deepbot`
+2. Keyring passphrase is asked every run
+   - Set `GOG_KEYRING_PASSWORD` in `.env.deepbot` and recreate deepbot container.
+3. `integrity check failed` when reading token
+   - Keyring/token was encrypted with a different passphrase. Remove `workspace/gogcli/keyring` and run `gog ... auth add ... --manual` again.
+4. `403 accessNotConfigured` on `whoami` / Gmail / Calendar
+   - Enable the required API in your Google Cloud project and retry after a few minutes.
+5. `permission denied` under `/root/.config/gogcli/*`
+   - Ensure `workspace/gogcli` ownership/mode matches the runtime user in the container.
+6. Do I need MCP for `gog`?
+   - No. `gog` works as a CLI through `shell` (`srt`) execution.
+
 ## 🧠 Session IDs
 - DM: `dm:{user_id}`
 - Guild channel: `guild:{guild_id}:channel:{channel_id}:user:{user_id}`

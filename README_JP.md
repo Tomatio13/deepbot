@@ -209,6 +209,67 @@ description: ドキュメントレビュー手順
 ---
 ```
 
+## 🧰 `gog`（Google Workspace CLI）の使い方
+`gog` は MCP ではなく、`shell` ツール経由で利用できます。
+
+### 初回セットアップ（1回）
+1. OAuth クライアントJSONを `config/gogcli/` に配置（例: `config/gogcli/client_secret_*.json`）。
+2. `.env.deepbot` に以下を設定:
+   - `GOGCLI_KEYRING_BACKEND=file`
+   - `GOG_KEYRING_PASSWORD=<強い固定パスフレーズ>`
+   - `GOG_ACCOUNT=<Googleメールアドレス>`
+3. deepbot を再作成:
+```bash
+docker compose up -d --force-recreate deepbot
+```
+4. 認証情報登録と初回認可:
+```bash
+docker compose run --rm --no-deps deepbot \
+  gog --client personal auth credentials set /app/config/gogcli/client_secret_xxx.json
+
+docker compose run --rm --no-deps deepbot \
+  gog --client personal auth add you@example.com --manual
+```
+
+### 実行例（SRT経由）
+```bash
+docker compose exec deepbot \
+  srt --settings /app/config/srt-settings.json -c "gog --client personal whoami"
+
+docker compose exec deepbot \
+  srt --settings /app/config/srt-settings.json -c "gog --client personal calendar events primary --today --max 20"
+
+docker compose exec deepbot \
+  srt --settings /app/config/srt-settings.json -c "gog --client personal gmail messages search 'in:inbox is:unread' --max 10"
+```
+
+### Google APIドメイン許可（SRT）
+`shell` を SRT 強制している場合、`config/srt-settings.json` の `allowedDomains` に Google API ドメインを追加してください。  
+最低限の例:
+- `accounts.google.com`
+- `oauth2.googleapis.com`
+- `www.googleapis.com`
+- 利用サービスのAPI（例: `people.googleapis.com`, `gmail.googleapis.com`, `calendar.googleapis.com`, `drive.googleapis.com`）
+
+### 参考サイト
+- https://zenn.dev/takna/articles/gog-cli-setup-guide
+- https://github.com/openclaw/openclaw/blob/main/skills/gog/SKILL.md
+
+## ❓ FAQ（`gog`）
+1. `gog: command not found` が出る
+   - イメージ再ビルドと再作成を実行:
+   - `docker compose build deepbot && docker compose up -d --force-recreate deepbot`
+2. 実行のたびに keyring パスフレーズを聞かれる
+   - `.env.deepbot` の `GOG_KEYRING_PASSWORD` を設定し、`deepbot` を再作成。
+3. `integrity check failed` が出る
+   - 別パスフレーズで暗号化されたトークン不一致。`workspace/gogcli/keyring` を削除して `gog ... auth add ... --manual` を再実行。
+4. `403 accessNotConfigured` が出る
+   - 対象APIを Google Cloud プロジェクトで有効化し、数分待って再実行。
+5. `/root/.config/gogcli/*` で `permission denied`
+   - `workspace/gogcli` の所有者/権限を、コンテナ実行ユーザーに合わせる。
+6. `gog` に MCP は必要？
+   - 不要。`shell`（`srt`）経由のCLI実行で利用可能。
+
 ## 🧠 セッション仕様
 - DM: `dm:{user_id}`
 - ギルド: `guild:{guild_id}:channel:{channel_id}:user:{user_id}`

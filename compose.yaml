@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        GOGCLI_VERSION: ${GOGCLI_VERSION:-latest}
     image: deepbot:latest
     container_name: deepbot
     working_dir: /app
@@ -28,6 +30,7 @@ services:
     volumes:
       - ./config:/app/config:ro
       - ./workspace:/workspace
+      - ./workspace/gogcli:/root/.config/gogcli
     restart: unless-stopped
 
   litellm:
