@@ -214,3 +214,38 @@ def test_config_requires_http_sidecar_url_when_sidecar_transport(
 
     with pytest.raises(ConfigError, match="CLAUDE_SUBAGENT_SIDECAR_URL"):
         load_config()
+
+
+def test_config_parses_claude_hooks_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("CLAUDE_HOOKS_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_HOOKS_TIMEOUT_MS", "2500")
+    monkeypatch.setenv("CLAUDE_HOOKS_FAIL_MODE", "closed")
+    monkeypatch.setenv(
+        "CLAUDE_HOOKS_SETTINGS_PATHS",
+        ".claude/settings.local.json,.claude/settings.json,~/.claude/settings.json",
+    )
+
+    config = load_config()
+    assert config.claude_hooks_enabled is True
+    assert config.claude_hooks_timeout_ms == 2500
+    assert config.claude_hooks_fail_mode == "closed"
+    assert config.claude_hooks_settings_paths == (
+        ".claude/settings.local.json",
+        ".claude/settings.json",
+        "~/.claude/settings.json",
+    )
+
+
+def test_config_rejects_invalid_claude_hooks_fail_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("CLAUDE_HOOKS_FAIL_MODE", "invalid")
+
+    with pytest.raises(ConfigError, match="CLAUDE_HOOKS_FAIL_MODE"):
+        load_config()

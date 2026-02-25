@@ -5,11 +5,13 @@ import json
 import logging
 import re
 import types
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from deepbot.config import AppConfig, ConfigError, RuntimeSettings
+from deepbot.agent.claude_hooks import ClaudeHooksManager
 from deepbot.mcp_tools import load_mcp_tool_providers
 from deepbot.agent.claude_subagent_tool import (
     ClaudeSubagentSettings,
@@ -43,39 +45,101 @@ class ImageAttachment:
 
 
 class AgentRuntime:
-    def __init__(self, *, agent_callable: Callable[[str], Any], timeout_seconds: int) -> None:
+    def __init__(
+        self,
+        *,
+        agent_callable: Callable[[str], Any],
+        timeout_seconds: int,
+        hook_manager: ClaudeHooksManager | None = None,
+    ) -> None:
         self._agent_callable = agent_callable
         self._timeout_seconds = timeout_seconds
+        self._hook_manager = hook_manager
         # Strands Agent does not support concurrent invocations.
         self._call_lock = asyncio.Lock()
 
     async def generate_reply(self, request: AgentRequest) -> str:
-        model_input = self._build_model_input(request)
-        fallback_prompt = self._build_prompt(request)
+        effective_request = request
+        prompt_text = ""
+        if request.context:
+            with suppress(Exception):
+                last_user = next(
+                    (
+                        item for item in reversed(request.context)
+                        if str(item.get("role", "")).strip() == "user"
+                    ),
+                    None,
+                )
+                if last_user is not None:
+                    prompt_text = str(last_user.get("content", "")).strip()
+
+        if self._hook_manager is not None:
+            start_result = self._hook_manager.dispatch_session_start(
+                session_id=request.session_id,
+                prompt=prompt_text,
+            )
+            submit_result = self._hook_manager.dispatch_user_prompt_submit(
+                session_id=request.session_id,
+                prompt=prompt_text,
+            )
+            if submit_result.blocked:
+                return submit_result.user_message or "このリクエストは hooks により拒否されました。"
+
+            extra_parts = [start_result.additional_context, submit_result.additional_context]
+            extra_context = "\n".join(part for part in extra_parts if part).strip()
+            if extra_context:
+                merged_context = [dict(item) for item in request.context]
+                merged_context.append(
+                    {
+                        "role": "system",
+                        "content": f"[hooks.additional_context]\n{extra_context}",
+                    }
+                )
+                effective_request = AgentRequest(
+                    session_id=request.session_id,
+                    context=merged_context,
+                    image_attachments=request.image_attachments,
+                    progress_callback=request.progress_callback,
+                    tool_event_callback=request.tool_event_callback,
+                    enabled_skills=request.enabled_skills,
+                    allowed_mcp_servers=request.allowed_mcp_servers,
+                    allowed_mcp_tools=request.allowed_mcp_tools,
+                )
+
+        model_input = self._build_model_input(effective_request)
+        fallback_prompt = self._build_prompt(effective_request)
         async with self._call_lock:
             try:
                 response = await self._run_agent_with_timeout(
                     model_input=model_input,
-                    request=request,
+                    request=effective_request,
                 )
             except Exception as exc:
-                if request.image_attachments and self._should_retry_without_images(exc):
+                if effective_request.image_attachments and self._should_retry_without_images(exc):
                     logger.warning(
                         "Image input rejected by model provider. Retrying without images. session_id=%s",
-                        request.session_id,
+                        effective_request.session_id,
                     )
                     response = await self._run_agent_with_timeout(
                         model_input=fallback_prompt,
-                        request=request,
+                        request=effective_request,
                     )
                 else:
                     raise
+        if self._hook_manager is not None:
+            stop_result = self._hook_manager.dispatch_stop(
+                session_id=effective_request.session_id,
+                response_text=str(response).strip(),
+            )
+            if stop_result.blocked and stop_result.user_message:
+                return stop_result.user_message
         return str(response).strip()
 
     async def _run_agent_with_timeout(self, *, model_input: Any, request: AgentRequest) -> str:
         stream_async = getattr(self._agent_callable, "stream_async", None)
         if callable(stream_async):
             partial: dict[str, Any] = {"text": ""}
+            tool_inputs: dict[str, Any] = {}
 
             async def _consume_stream() -> str:
                 last_tool_name = ""
@@ -83,6 +147,32 @@ class AgentRuntime:
                     if not isinstance(event, dict):
                         continue
                     tool_event = self._extract_tool_event(event)
+                    if tool_event is not None and self._hook_manager is not None:
+                        phase = str(tool_event.get("phase", "")).strip().lower()
+                        call_id = str(tool_event.get("call_id", "")).strip()
+                        tool_name = str(tool_event.get("name", "")).strip()
+                        if phase == "start" and call_id and tool_name:
+                            tool_input = tool_event.get("arguments", {})
+                            tool_inputs[call_id] = tool_input
+                            pre = self._hook_manager.dispatch_pre_tool_use(
+                                session_id=request.session_id,
+                                tool_name=tool_name,
+                                tool_input=tool_input,
+                            )
+                            if pre.blocked:
+                                detail = pre.model_message or pre.user_message or "blocked by PreToolUse hook"
+                                raise RuntimeError(f"{tool_name} rejected by hook: {detail}")
+                        if phase == "end" and call_id:
+                            tool_input = tool_inputs.pop(call_id, {})
+                            post = self._hook_manager.dispatch_post_tool_use(
+                                session_id=request.session_id,
+                                tool_name=tool_name or "tool",
+                                tool_input=tool_input,
+                                tool_response=tool_event.get("output"),
+                            )
+                            if post.blocked:
+                                detail = post.model_message or post.user_message or "blocked by PostToolUse hook"
+                                raise RuntimeError(f"{tool_name or 'tool'} blocked after execution: {detail}")
                     if tool_event is not None and request.tool_event_callback is not None:
                         await request.tool_event_callback(tool_event)
                     data = event.get("data")
@@ -431,16 +521,16 @@ def _load_default_tools(config: AppConfig) -> list[Any]:
         try:
             loaded_tools.append(
                 build_claude_subagent_tool(
-                    ClaudeSubagentSettings(
-                        command=config.claude_subagent_command,
-                        workdir=config.claude_subagent_workdir,
-                        timeout_seconds=config.claude_subagent_timeout_seconds,
-                        model=config.claude_subagent_model,
-                        skip_permissions=config.claude_subagent_skip_permissions,
-                        transport=config.claude_subagent_transport,
-                        sidecar_url=config.claude_subagent_sidecar_url,
-                        sidecar_token=config.claude_subagent_sidecar_token,
-                    )
+                ClaudeSubagentSettings(
+                    command=config.claude_subagent_command,
+                    workdir=config.claude_subagent_workdir,
+                    timeout_seconds=config.claude_subagent_timeout_seconds,
+                    model=config.claude_subagent_model,
+                    skip_permissions=config.claude_subagent_skip_permissions,
+                    transport=config.claude_subagent_transport,
+                    sidecar_url=config.claude_subagent_sidecar_url,
+                    sidecar_token=config.claude_subagent_sidecar_token,
+                )
                 )
             )
             logger.info("Loaded optional tool: claude_subagent")
@@ -700,6 +790,20 @@ def create_runtime(config: AppConfig, settings: RuntimeSettings) -> AgentRuntime
         raise ConfigError(f"Failed to import Strands Agent: {exc}") from exc
 
     model = _load_model(config)
+    hook_manager: ClaudeHooksManager | None = None
+    if config.claude_hooks_enabled:
+        hook_manager = ClaudeHooksManager.from_settings_paths(
+            config.claude_hooks_settings_paths,
+            timeout_ms=config.claude_hooks_timeout_ms,
+            fail_mode=config.claude_hooks_fail_mode,
+        )
+        if hook_manager.has_any_hooks():
+            logger.info(
+                "Loaded Claude-compatible hooks from settings files: %s",
+                ", ".join(hook_manager.loaded_files) or "(none)",
+            )
+        else:
+            logger.info("Claude-compatible hooks enabled but no valid hooks were loaded.")
     tools = _load_default_tools(config)
 
     agent_kwargs: dict[str, Any] = {
@@ -710,4 +814,8 @@ def create_runtime(config: AppConfig, settings: RuntimeSettings) -> AgentRuntime
         agent_kwargs["model"] = model
 
     agent = Agent(**agent_kwargs)
-    return AgentRuntime(agent_callable=agent, timeout_seconds=settings.timeout_seconds)
+    return AgentRuntime(
+        agent_callable=agent,
+        timeout_seconds=settings.timeout_seconds,
+        hook_manager=hook_manager,
+    )

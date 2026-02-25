@@ -252,6 +252,34 @@ At minimum include:
 - `www.googleapis.com`
 - service APIs you actually use (for example `people.googleapis.com`, `gmail.googleapis.com`, `calendar.googleapis.com`, `drive.googleapis.com`)
 
+### How to write `config/srt-settings.json`
+Use this as a baseline when you enable `shell` with SRT:
+
+```json
+{
+  "network": {
+    "allowedDomains": [
+      "pypi.org",
+      "files.pythonhosted.org",
+      "finance.yahoo.com",
+      "query1.finance.yahoo.com",
+      "query2.finance.yahoo.com",
+      "guce.yahoo.com"
+    ]
+  },
+  "filesystem": {
+    "allowWrite": ["/workspace", "/tmp"],
+    "denyRead": ["/app/.env", "/app/.git", "/app/config/mcp.json", "/app/config/AGENT.md"],
+    "denyWrite": ["/app", "/app/.env", "/app/.git", "/app/config/mcp.json", "/app/config/AGENT.md"]
+  }
+}
+```
+
+Notes:
+- Add every outbound host your tools actually touch (`curl error 6` means unresolved/blocked host).
+- If your environment requires a proxy, add the proxy host to `allowedDomains` too.
+- `srt --settings /app/config/srt-settings.json -c "..."` reads settings at runtime; restarting deepbot is usually unnecessary for this file change.
+
 ### References
 - https://zenn.dev/takna/articles/gog-cli-setup-guide
 - https://github.com/openclaw/openclaw/blob/main/skills/gog/SKILL.md
@@ -324,3 +352,64 @@ Use via LiteLLM (Claude Code LLM Gateway style):
 - Set token on both sides:
   - `.env.deepbot`: `CLAUDE_SUBAGENT_SIDECAR_TOKEN=...`
   - `.env.claude`: `CLAUDE_RUNNER_TOKEN=...`
+
+## 🪝 Claude-Compatible Hooks (Optional)
+- Enable in `.env.deepbot`:
+  - `CLAUDE_HOOKS_ENABLED=true`
+  - `CLAUDE_HOOKS_TIMEOUT_MS=5000`
+  - `CLAUDE_HOOKS_FAIL_MODE=open` (`open|closed`)
+  - `CLAUDE_HOOKS_SETTINGS_PATHS=/app/config/claude/settings.json`
+- deepbot reads Claude Code style `hooks` structure from settings files.
+- Supported events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`
+- Matcher names for tool events are mapped close to Claude names:
+  - `shell -> Bash`
+  - `file_read -> Read`
+  - `file_write -> Write`
+  - `editor -> Edit`
+  - `http_request -> WebFetch`
+- `exit code 2` is treated as a blocking decision.
+
+Placement (assuming `config` directory):
+- Hooks settings file:
+  - Host path: `./config/claude/settings.json`
+  - Container path: `/app/config/claude/settings.json`
+- Put the container path into `.env.deepbot`:
+  - `CLAUDE_HOOKS_SETTINGS_PATHS=/app/config/claude/settings.json`
+
+If hooks need custom shell scripts:
+- Script location:
+  - Host path: `./config/claude/hooks/*.sh`
+  - Container path: `/app/config/claude/hooks/*.sh`
+- Use container absolute paths in `command`:
+  - Example: `"/app/config/claude/hooks/pre_tool_use.sh"`
+- Make scripts executable on host (`chmod +x`).
+- If scripts must write files, use `./workspace` (mounted as `/workspace`).
+
+Example `settings.json`:
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat >/dev/null; echo '{\"continue\":true}'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/app/config/claude/hooks/pre_tool_use.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```

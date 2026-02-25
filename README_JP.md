@@ -251,6 +251,34 @@ docker compose exec deepbot \
 - `www.googleapis.com`
 - 利用サービスのAPI（例: `people.googleapis.com`, `gmail.googleapis.com`, `calendar.googleapis.com`, `drive.googleapis.com`）
 
+### `config/srt-settings.json` の書き方
+`shell` を SRT で有効化する場合、次をベースに調整してください。
+
+```json
+{
+  "network": {
+    "allowedDomains": [
+      "pypi.org",
+      "files.pythonhosted.org",
+      "finance.yahoo.com",
+      "query1.finance.yahoo.com",
+      "query2.finance.yahoo.com",
+      "guce.yahoo.com"
+    ]
+  },
+  "filesystem": {
+    "allowWrite": ["/workspace", "/tmp"],
+    "denyRead": ["/app/.env", "/app/.git", "/app/config/mcp.json", "/app/config/AGENT.md"],
+    "denyWrite": ["/app", "/app/.env", "/app/.git", "/app/config/mcp.json", "/app/config/AGENT.md"]
+  }
+}
+```
+
+ポイント:
+- ツールが実際にアクセスする外向きホストをすべて `allowedDomains` に追加する（`curl error 6` は未許可/未解決ホストの典型）。
+- プロキシ必須環境では、プロキシホスト自体も `allowedDomains` に追加する。
+- `srt --settings /app/config/srt-settings.json -c "..."` は実行時に設定を読むため、通常このファイル変更だけなら deepbot 再起動は不要。
+
 ### 参考サイト
 - https://zenn.dev/takna/articles/gog-cli-setup-guide
 - https://github.com/openclaw/openclaw/blob/main/skills/gog/SKILL.md
@@ -323,3 +351,64 @@ LiteLLM 経由にする場合（Claude Code の LLM Gateway 方式）:
 - トークンを両側で一致させる:
   - `.env.deepbot`: `CLAUDE_SUBAGENT_SIDECAR_TOKEN=...`
   - `.env.claude`: `CLAUDE_RUNNER_TOKEN=...`
+
+## 🪝 Claude互換 Hooks（任意）
+- `.env.deepbot` で有効化:
+  - `CLAUDE_HOOKS_ENABLED=true`
+  - `CLAUDE_HOOKS_TIMEOUT_MS=5000`
+  - `CLAUDE_HOOKS_FAIL_MODE=open`（`open|closed`）
+  - `CLAUDE_HOOKS_SETTINGS_PATHS=/app/config/claude/settings.json`
+- 設定ファイルは Claude Code 互換の `hooks` 構造を読み込みます。
+- 対応イベント: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`
+- `PreToolUse` / `PostToolUse` の matcher は Claude名に寄せて解釈:
+  - `shell -> Bash`
+  - `file_read -> Read`
+  - `file_write -> Write`
+  - `editor -> Edit`
+  - `http_request -> WebFetch`
+- `exit code 2` はブロック扱い（イベント種別に応じて拒否理由を表示）。
+
+配置場所（config配下を使う前提）:
+- hooks設定ファイル:
+  - ホスト側: `./config/claude/settings.json`
+  - コンテナ側: `/app/config/claude/settings.json`
+- `.env.deepbot` にはコンテナ側パスを記載:
+  - `CLAUDE_HOOKS_SETTINGS_PATHS=/app/config/claude/settings.json`
+
+hooks から独自シェルを呼ぶ場合:
+- 実行スクリプト配置:
+  - ホスト側: `./config/claude/hooks/*.sh`
+  - コンテナ側: `/app/config/claude/hooks/*.sh`
+- `settings.json` の `command` はコンテナ側絶対パスで指定:
+  - 例: `"/app/config/claude/hooks/pre_tool_use.sh"`
+- スクリプトに実行権限を付与（ホスト側で `chmod +x`）。
+- 書き込みが必要な処理は `./workspace`（コンテナ内 `/workspace`）を使う。
+
+`settings.json` 例:
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat >/dev/null; echo '{\"continue\":true}'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/app/config/claude/hooks/pre_tool_use.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```

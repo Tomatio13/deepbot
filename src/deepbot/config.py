@@ -70,6 +70,10 @@ class AppConfig:
     claude_subagent_transport: str
     claude_subagent_sidecar_url: str
     claude_subagent_sidecar_token: str
+    claude_hooks_enabled: bool
+    claude_hooks_timeout_ms: int
+    claude_hooks_fail_mode: str
+    claude_hooks_settings_paths: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -89,6 +93,13 @@ def _parse_csv(raw: str | None) -> tuple[str, ...]:
     if not raw:
         return ()
     items = [item.strip().lower() for item in raw.split(",")]
+    return tuple(item for item in items if item)
+
+
+def _parse_csv_raw(raw: str | None) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    items = [item.strip() for item in raw.split(",")]
     return tuple(item for item in items if item)
 
 
@@ -314,6 +325,26 @@ def load_config() -> AppConfig:
             raise ConfigError(
                 "CLAUDE_SUBAGENT_SIDECAR_URL must start with http:// or https://"
             )
+    claude_hooks_enabled = _parse_bool(
+        os.environ.get("CLAUDE_HOOKS_ENABLED"),
+        default=False,
+    )
+    claude_hooks_timeout_ms = int(os.environ.get("CLAUDE_HOOKS_TIMEOUT_MS", "5000"))
+    claude_hooks_fail_mode = (
+        os.environ.get("CLAUDE_HOOKS_FAIL_MODE", "open").strip().lower() or "open"
+    )
+    claude_hooks_settings_paths = _parse_csv_raw(
+        os.environ.get(
+            "CLAUDE_HOOKS_SETTINGS_PATHS",
+            ".claude/settings.local.json,.claude/settings.json,~/.claude/settings.json",
+        )
+    )
+    if claude_hooks_timeout_ms <= 0:
+        raise ConfigError("CLAUDE_HOOKS_TIMEOUT_MS must be > 0")
+    if claude_hooks_fail_mode not in {"open", "closed"}:
+        raise ConfigError("CLAUDE_HOOKS_FAIL_MODE must be one of: open, closed")
+    if not claude_hooks_settings_paths:
+        raise ConfigError("CLAUDE_HOOKS_SETTINGS_PATHS must include at least one path")
 
     return AppConfig(
         discord_bot_token=token,
@@ -389,6 +420,10 @@ def load_config() -> AppConfig:
         claude_subagent_transport=claude_subagent_transport,
         claude_subagent_sidecar_url=claude_subagent_sidecar_url,
         claude_subagent_sidecar_token=claude_subagent_sidecar_token,
+        claude_hooks_enabled=claude_hooks_enabled,
+        claude_hooks_timeout_ms=claude_hooks_timeout_ms,
+        claude_hooks_fail_mode=claude_hooks_fail_mode,
+        claude_hooks_settings_paths=claude_hooks_settings_paths,
     )
 
 
