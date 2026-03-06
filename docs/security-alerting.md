@@ -89,6 +89,66 @@ sudo systemctl restart fluent-bit
 
 ローカル検証を急ぐ場合は、`dedupe_seconds` を一時的に小さくするか、`SECURITY_ALLOWLIST` を空にしてください。
 
+## auditd 連携
+
+このホストでは `auditd` を使って、変更検知系イベントも `deepbot` に流せます。
+
+現在の最小ルールセットでは、次の `auditd` key を Fluent Bit でカテゴリへ変換しています。
+
+- `priv_esc` -> `privilege_escalation`
+- `identity` -> `identity_change`
+- `scope` -> `privilege_scope_change`
+- `sshd_config` -> `ssh_config_change`
+- `ssh_authorized_keys` -> `ssh_authorized_keys_change`
+- `docker_config` -> `docker_config_change`
+- `docker_sock` -> `docker_socket_change`
+- `docker_cmd` -> `docker_command_execution`
+- `docker_high_risk_cmd` -> `docker_high_risk_command`
+
+監査対象の例:
+
+- `/etc/passwd`
+- `/etc/group`
+- `/etc/shadow`
+- `/etc/gshadow`
+- `/etc/sudoers`
+- `/etc/sudoers.d`
+- `/etc/ssh/sshd_config`
+- `/etc/ssh/sshd_config.d`
+- `/root/.ssh/authorized_keys`
+- `/etc/docker/daemon.json`
+- `/etc/systemd/system/docker.service.d`
+- `/var/run/docker.sock`
+- 一般ユーザー起点で `euid=0` になる `execve`
+- 一般ユーザー起点の `/usr/bin/docker` 実行
+
+高リスク扱いにしたい Docker パターンの例:
+
+- `--privileged`
+- `--network=host`
+- `--pid=host`
+- `/var/run/docker.sock` の bind mount
+- `-v /:/...` のようなホストルート bind mount
+
+これらは `docker_high_risk_command` として通常の `docker_command_execution` から分離して通知できます。
+
+Fluent Bit 側では、現在使っている次のファイルに `audit.log` の tail input と分類ルールを追加済みです。
+
+- `/home/masato/Agentic/host-security-watchdog/fluent-bit.conf`
+- `/home/masato/Agentic/host-security-watchdog/parsers.conf`
+
+`auditd` 側の永続ルールは次に配置しています。
+
+- `/etc/audit/rules.d/deepbot-security.rules`
+
+動作確認例:
+
+```bash
+sudo ausearch -k priv_esc -ts recent
+sudo ausearch -k sshd_config -ts recent
+sudo ausearch -k identity -ts recent
+```
+
 ## 動作確認
 
 待受確認:

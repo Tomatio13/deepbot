@@ -1,0 +1,91 @@
+rules:
+  - category: auth_failure
+    severity: medium
+    threshold: 2
+    window_seconds: 300
+    dedupe_seconds: 300
+    description: Repeated SSH authentication failures from the same source.
+  - category: sudo_auth_failure
+    severity: medium
+    threshold: 1
+    window_seconds: 300
+    dedupe_seconds: 300
+    description: Repeated sudo authentication failures on the local host.
+  - category: auth_success
+    severity: high
+    threshold: 1
+    window_seconds: 60
+    dedupe_seconds: 900
+    description: Successful remote login.
+  - category: privilege_escalation
+    severity: high
+    threshold: 1
+    window_seconds: 60
+    dedupe_seconds: 900
+    description: sudo or su activity detected.
+  - category: ufw_block
+    severity: medium
+    threshold: 3
+    window_seconds: 300
+    dedupe_seconds: 300
+    description: Repeated UFW block events from external sources.
+  - category: new_listen_port
+    severity: high
+    threshold: 1
+    window_seconds: 60
+    dedupe_seconds: 900
+    description: A new non-loopback listening port was detected.
+  - category: host_resource_pressure
+    severity: high
+    threshold: 1
+    window_seconds: 60
+    dedupe_seconds: 600
+    description: Host CPU, memory, or disk usage exceeded configured thresholds.
+  - category: identity_change
+    severity: high
+    threshold: 1
+    window_seconds: 60
+    dedupe_seconds: 900
+    description: Identity or authentication-related files were modified.
+  - category: privilege_scope_change
+    severity: high
+    threshold: 1
+    window_seconds: 60
+    dedupe_seconds: 900
+    description: Privilege escalation policy or sudo configuration changed.
+  - category: ssh_config_change
+    severity: high
+    threshold: 1
+    window_seconds: 60
+    dedupe_seconds: 900
+    description: SSH daemon configuration changed.
+  - category: ssh_authorized_keys_change
+    severity: high
+    threshold: 1
+    window_seconds: 60
+    dedupe_seconds: 900
+    description: SSH authorized_keys changed.
+  - category: docker_config_change
+    severity: high
+    threshold: 1
+    window_seconds: 60
+    dedupe_seconds: 900
+    description: Docker daemon or systemd docker configuration changed.
+  - category: docker_socket_change
+    severity: high
+    threshold: 1
+    window_seconds: 60
+    dedupe_seconds: 900
+    description: Docker socket permissions or attributes changed.
+  - category: docker_command_execution
+    severity: medium
+    threshold: 1
+    window_seconds: 60
+    dedupe_seconds: 300
+    description: Docker command execution by a local interactive user was detected.
+  - category: docker_high_risk_command
+    severity: high
+    threshold: 1
+    window_seconds: 60
+    dedupe_seconds: 300
+    description: High-risk Docker command options or host mounts were detected.
