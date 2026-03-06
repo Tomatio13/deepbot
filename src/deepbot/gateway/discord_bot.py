@@ -190,6 +190,7 @@ class MessageProcessor:
         cron_jobs_dir: Path | None = None,
         cron_default_timezone: str = "Asia/Tokyo",
         cron_busy_message: str | None = None,
+        security_service: Any | None = None,
     ) -> None:
         self._store = store
         self._runtime = runtime
@@ -223,6 +224,7 @@ class MessageProcessor:
         self._scheduled_run_lock = asyncio.Lock()
         self._cron_channel_sender: Callable[..., Awaitable[Any]] | None = None
         self._scheduler_engine: Any = None
+        self._security_service = security_service
 
     def log_gateway_event(
         self,
@@ -3012,6 +3014,7 @@ class DeepbotClientFactory:
         *,
         processor: MessageProcessor,
         scheduler: Any | None = None,
+        security_service: Any | None = None,
         auto_thread_enabled: bool = False,
         auto_thread_mode: str = "keyword",
         auto_thread_channel_ids: tuple[str, ...] = (),
@@ -3027,10 +3030,8 @@ class DeepbotClientFactory:
         intents.guilds = True
 
         class DeepbotClient(discord.Client):
-            async def on_ready(self) -> None:
-                logger.info("Deepbot logged in as %s", self.user)
-                if scheduler is not None:
-                    scheduler.start()
+            async def login(self, token: str) -> None:
+                await super().login(token)
 
                 async def _send_to_channel_id(
                     channel_id: str,
@@ -3056,10 +3057,22 @@ class DeepbotClientFactory:
                 processor.set_cron_channel_sender(_send_to_channel_id)
                 if scheduler is not None:
                     processor.bind_scheduler_engine(scheduler)
+                if processor._security_service is not None:
+                    processor._security_service.configure_sender(
+                        loop=asyncio.get_running_loop(),
+                        sender=_send_to_channel_id,
+                    )
+
+            async def on_ready(self) -> None:
+                logger.info("Deepbot logged in as %s", self.user)
+                if scheduler is not None:
+                    scheduler.start()
 
             async def close(self) -> None:
                 if scheduler is not None:
                     await scheduler.stop()
+                if processor._security_service is not None:
+                    processor._security_service.stop()
                 await super().close()
 
             async def on_message(self, message: Any) -> None:

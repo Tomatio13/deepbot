@@ -1,0 +1,13 @@
+[Unit]
+Description=Fluent Bit for Deepbot Security Alerts
+After=network.target deepbot.service
+Wants=deepbot.service
+
+[Service]
+Type=simple
+ExecStart=/opt/fluent-bit/bin/fluent-bit -c /opt/deepbot/infra/fluent-bit/fluent-bit.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

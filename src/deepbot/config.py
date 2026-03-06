@@ -74,6 +74,22 @@ class AppConfig:
     claude_hooks_timeout_ms: int
     claude_hooks_fail_mode: str
     claude_hooks_settings_paths: tuple[str, ...]
+    security_enabled: bool
+    security_alert_bind_host: str
+    security_alert_bind_port: int
+    security_rules_path: Path
+    security_allowlist: tuple[str, ...]
+    security_state_dir: Path
+    security_alert_channel_id: str
+    security_port_monitor_enabled: bool
+    security_port_monitor_interval_seconds: int
+    security_port_monitor_protocols: tuple[str, ...]
+    security_port_monitor_exclude_ports: tuple[int, ...]
+    security_resource_monitor_enabled: bool
+    security_resource_monitor_interval_seconds: int
+    security_cpu_load_percent_threshold: int
+    security_memory_percent_threshold: int
+    security_disk_percent_threshold: int
 
 
 @dataclass(frozen=True)
@@ -101,6 +117,18 @@ def _parse_csv_raw(raw: str | None) -> tuple[str, ...]:
         return ()
     items = [item.strip() for item in raw.split(",")]
     return tuple(item for item in items if item)
+
+
+def _parse_int_csv(raw: str | None) -> tuple[int, ...]:
+    if not raw:
+        return ()
+    values: list[int] = []
+    for item in _parse_csv_raw(raw):
+        try:
+            values.append(int(item))
+        except ValueError:
+            continue
+    return tuple(values)
 
 
 def _parse_json_or_file(raw: str | None) -> dict[str, Any]:
@@ -346,6 +374,37 @@ def load_config() -> AppConfig:
     if not claude_hooks_settings_paths:
         raise ConfigError("CLAUDE_HOOKS_SETTINGS_PATHS must include at least one path")
 
+    security_enabled = _parse_bool(os.environ.get("SECURITY_ENABLED"), default=False)
+    security_alert_bind_host = os.environ.get("SECURITY_ALERT_BIND_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    security_alert_bind_port = int(os.environ.get("SECURITY_ALERT_BIND_PORT", "8088"))
+    security_rules_path = Path(
+        os.environ.get("SECURITY_RULES_PATH", "/app/config/security/detection-rules.yaml").strip()
+        or "/app/config/security/detection-rules.yaml"
+    ).expanduser()
+    security_allowlist = _parse_csv_raw(os.environ.get("SECURITY_ALLOWLIST", "127.0.0.1,::1"))
+    security_state_dir = Path(
+        os.environ.get("SECURITY_STATE_DIR", "/workspace/bot-rw/security").strip()
+        or "/workspace/bot-rw/security"
+    ).expanduser()
+    security_alert_channel_id = os.environ.get("SECURITY_ALERT_CHANNEL_ID", "").strip()
+    security_port_monitor_enabled = _parse_bool(os.environ.get("SECURITY_PORT_MONITOR_ENABLED"), default=True)
+    security_port_monitor_interval_seconds = int(os.environ.get("SECURITY_PORT_MONITOR_INTERVAL_SECONDS", "60"))
+    security_port_monitor_protocols = _parse_csv(os.environ.get("SECURITY_PORT_MONITOR_PROTOCOLS", "tcp"))
+    security_port_monitor_exclude_ports = _parse_int_csv(os.environ.get("SECURITY_PORT_MONITOR_EXCLUDE_PORTS", ""))
+    security_resource_monitor_enabled = _parse_bool(os.environ.get("SECURITY_RESOURCE_MONITOR_ENABLED"), default=True)
+    security_resource_monitor_interval_seconds = int(os.environ.get("SECURITY_RESOURCE_MONITOR_INTERVAL_SECONDS", "60"))
+    security_cpu_load_percent_threshold = int(os.environ.get("SECURITY_CPU_LOAD_PERCENT_THRESHOLD", "85"))
+    security_memory_percent_threshold = int(os.environ.get("SECURITY_MEMORY_PERCENT_THRESHOLD", "90"))
+    security_disk_percent_threshold = int(os.environ.get("SECURITY_DISK_PERCENT_THRESHOLD", "90"))
+    if security_alert_bind_port <= 0:
+        raise ConfigError("SECURITY_ALERT_BIND_PORT must be > 0")
+    if security_port_monitor_interval_seconds <= 0:
+        raise ConfigError("SECURITY_PORT_MONITOR_INTERVAL_SECONDS must be > 0")
+    if security_resource_monitor_interval_seconds <= 0:
+        raise ConfigError("SECURITY_RESOURCE_MONITOR_INTERVAL_SECONDS must be > 0")
+    if security_enabled and not security_alert_channel_id:
+        raise ConfigError("SECURITY_ALERT_CHANNEL_ID is required when SECURITY_ENABLED=true")
+
     return AppConfig(
         discord_bot_token=token,
         strands_model_provider=provider,
@@ -424,6 +483,22 @@ def load_config() -> AppConfig:
         claude_hooks_timeout_ms=claude_hooks_timeout_ms,
         claude_hooks_fail_mode=claude_hooks_fail_mode,
         claude_hooks_settings_paths=claude_hooks_settings_paths,
+        security_enabled=security_enabled,
+        security_alert_bind_host=security_alert_bind_host,
+        security_alert_bind_port=security_alert_bind_port,
+        security_rules_path=security_rules_path,
+        security_allowlist=security_allowlist,
+        security_state_dir=security_state_dir,
+        security_alert_channel_id=security_alert_channel_id,
+        security_port_monitor_enabled=security_port_monitor_enabled,
+        security_port_monitor_interval_seconds=security_port_monitor_interval_seconds,
+        security_port_monitor_protocols=security_port_monitor_protocols,
+        security_port_monitor_exclude_ports=security_port_monitor_exclude_ports,
+        security_resource_monitor_enabled=security_resource_monitor_enabled,
+        security_resource_monitor_interval_seconds=security_resource_monitor_interval_seconds,
+        security_cpu_load_percent_threshold=security_cpu_load_percent_threshold,
+        security_memory_percent_threshold=security_memory_percent_threshold,
+        security_disk_percent_threshold=security_disk_percent_threshold,
     )
 
 

@@ -24,6 +24,9 @@ Discord bot built with Strands Agents. It replies automatically to user messages
 - Prompt-driven rich replies via JSON (`markdown`, `ui_intent.buttons`, `images`) for buttons and image embeds
 - A2UI v0.9-style envelopes via JSON (`a2ui`) with Discord Components V2 rendering
 - Sends lightweight progress updates during long tool-based responses
+- Optional host security ingestion via Fluent Bit on `POST /alerts`, with LLM incident summaries posted into a Discord channel
+
+Host security alerting details are documented in `docs/security-alerting.md`.
 
 Developer notes for A2UI behavior and renderer constraints are documented in `docs/a2ui.md`.
 
@@ -124,6 +127,9 @@ docker compose up -d --build
 - `AUTH_MAX_RETRIES`, `AUTH_LOCK_MINUTES`
 - `DEFENDER_*` (prompt-injection defense)
 - `ATTACHMENT_ALLOWED_HOSTS` (remote attachment allowlist)
+
+### 3.3 Host Security Alerting
+See `docs/security-alerting.md` for setup, Fluent Bit integration, detection rule tuning, and troubleshooting.
 
 ### 3.1 Scheduled Jobs (Cron-like)
 - `CRON_ENABLED=true`

@@ -31,6 +31,8 @@ services:
       - ./config:/app/config:ro
       - ./workspace:/workspace
       - ./workspace/gogcli:/root/.config/gogcli
+    ports:
+      - "127.0.0.1:8088:8088"
     restart: unless-stopped
 
   claude-runner:

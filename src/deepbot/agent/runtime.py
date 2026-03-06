@@ -783,13 +783,29 @@ def _build_system_prompt(config: AppConfig) -> str:
     return f"{base_prompt}\n\n<agent_md>\n{agent_md}\n</agent_md>"
 
 
-def create_runtime(config: AppConfig, settings: RuntimeSettings) -> AgentRuntime:
+def create_agent(
+    config: AppConfig,
+    *,
+    system_prompt: str | None = None,
+    tools: list[Any] | None = None,
+) -> Any:
     try:
         from strands import Agent
     except Exception as exc:  # pragma: no cover
         raise ConfigError(f"Failed to import Strands Agent: {exc}") from exc
 
     model = _load_model(config)
+    agent_kwargs: dict[str, Any] = {
+        "tools": _load_default_tools(config) if tools is None else tools,
+        "system_prompt": system_prompt or _build_system_prompt(config),
+    }
+    if model is not None:
+        agent_kwargs["model"] = model
+
+    return Agent(**agent_kwargs)
+
+
+def create_runtime(config: AppConfig, settings: RuntimeSettings) -> AgentRuntime:
     hook_manager: ClaudeHooksManager | None = None
     if config.claude_hooks_enabled:
         hook_manager = ClaudeHooksManager.from_settings_paths(
@@ -804,16 +820,8 @@ def create_runtime(config: AppConfig, settings: RuntimeSettings) -> AgentRuntime
             )
         else:
             logger.info("Claude-compatible hooks enabled but no valid hooks were loaded.")
-    tools = _load_default_tools(config)
 
-    agent_kwargs: dict[str, Any] = {
-        "tools": tools,
-        "system_prompt": _build_system_prompt(config),
-    }
-    if model is not None:
-        agent_kwargs["model"] = model
-
-    agent = Agent(**agent_kwargs)
+    agent = create_agent(config)
     return AgentRuntime(
         agent_callable=agent,
         timeout_seconds=settings.timeout_seconds,

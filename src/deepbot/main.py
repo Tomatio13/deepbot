@@ -8,7 +8,7 @@ from deepbot.gateway.discord_bot import AuthConfig, DeepbotClientFactory, Messag
 from deepbot.logging import setup_logging
 from deepbot.memory.session_store import SessionStore
 from deepbot.scheduler import SchedulerEngine, SchedulerSettings
-from deepbot.security import DefenderSettings, PromptInjectionDefender
+from deepbot.security import DefenderSettings, PromptInjectionDefender, SecurityAlertService
 
 
 def main() -> None:
@@ -26,6 +26,9 @@ def main() -> None:
         ttl_seconds=settings.ttl_seconds,
     )
     runtime = create_runtime(config, settings)
+    security_service = SecurityAlertService(config) if config.security_enabled else None
+    if security_service is not None:
+        security_service.start()
 
     processor = MessageProcessor(
         store=session_store,
@@ -72,6 +75,7 @@ def main() -> None:
         auto_thread_trigger_keywords=config.auto_thread_trigger_keywords,
         auto_thread_archive_minutes=config.auto_thread_archive_minutes,
         auto_thread_rename_from_reply=config.auto_thread_rename_from_reply,
+        security_service=security_service,
     )
 
     logger.info("Starting Deepbot (auto_reply_all=%s)", config.auto_reply_all)

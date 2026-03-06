@@ -249,3 +249,32 @@ def test_config_rejects_invalid_claude_hooks_fail_mode(
 
     with pytest.raises(ConfigError, match="CLAUDE_HOOKS_FAIL_MODE"):
         load_config()
+
+
+def test_config_requires_security_alert_channel_when_security_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("SECURITY_ENABLED", "true")
+    monkeypatch.setenv("SECURITY_ALERT_CHANNEL_ID", "")
+
+    with pytest.raises(ConfigError, match="SECURITY_ALERT_CHANNEL_ID"):
+        load_config()
+
+
+def test_config_parses_security_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_base_env(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("AUTH_PASSPHRASE", "")
+    monkeypatch.setenv("SECURITY_ENABLED", "true")
+    monkeypatch.setenv("SECURITY_ALERT_CHANNEL_ID", "123456")
+    monkeypatch.setenv("SECURITY_PORT_MONITOR_EXCLUDE_PORTS", "22,8080")
+
+    config = load_config()
+
+    assert config.security_enabled is True
+    assert config.security_alert_channel_id == "123456"
+    assert config.security_alert_bind_port == 8088
+    assert config.security_port_monitor_exclude_ports == (22, 8080)

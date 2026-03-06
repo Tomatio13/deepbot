@@ -1,0 +1,15 @@
+[Unit]
+Description=Deepbot Security Alert Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/deepbot
+EnvironmentFile=/opt/deepbot/.env.deepbot
+ExecStart=/opt/deepbot/.venv/bin/deepbot
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
