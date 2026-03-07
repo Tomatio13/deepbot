@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Deepbot Host Resource Monitor every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Unit=host-resource-monitor.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

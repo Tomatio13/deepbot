@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from .detector import IncidentDetector, normalize_record
 from .models import DetectionRule, Incident, LogEvent, Notification
-from .monitors import PortMonitor, ResourceMonitor, ResourceSnapshot, SecurityMonitorConfig
+from .monitors import (
+    PortMonitor,
+    ResourceMonitor,
+    ResourceSnapshot,
+    SecurityMonitorConfig,
+    collect_resource_snapshot,
+    detect_resource_pressure,
+)
 from .policy import DefenderDecision, DefenderSettings, PromptInjectionDefender
 from .store import LocalEventStore
 
@@ -20,6 +27,8 @@ __all__ = [
     "PromptInjectionDefender",
     "ResourceMonitor",
     "ResourceSnapshot",
+    "collect_resource_snapshot",
+    "detect_resource_pressure",
     "SecurityAlertService",
     "SecurityMonitorConfig",
     "load_rules",

@@ -192,6 +192,34 @@ class ResourceSnapshot:
     disk_percent: float
 
 
+def collect_resource_snapshot(*, disk_path: str = "/") -> ResourceSnapshot:
+    load1, _, _ = os.getloadavg()
+    cpu_count = os.cpu_count() or 1
+    return ResourceSnapshot(
+        cpu_load_percent=(load1 / cpu_count) * 100.0,
+        memory_percent=_read_memory_percent(),
+        disk_percent=_read_disk_percent(disk_path),
+    )
+
+
+def detect_resource_pressure(
+    snapshot: ResourceSnapshot,
+    *,
+    cpu_threshold: int,
+    memory_threshold: int,
+    disk_threshold: int,
+    disk_path: str = "/",
+) -> list[str]:
+    issues: list[str] = []
+    if snapshot.cpu_load_percent >= cpu_threshold:
+        issues.append(f"CPU load {snapshot.cpu_load_percent:.1f}% >= {cpu_threshold}%")
+    if snapshot.memory_percent >= memory_threshold:
+        issues.append(f"Memory {snapshot.memory_percent:.1f}% >= {memory_threshold}%")
+    if snapshot.disk_percent >= disk_threshold:
+        issues.append(f"Disk {disk_path} {snapshot.disk_percent:.1f}% >= {disk_threshold}%")
+    return issues
+
+
 class ResourceMonitor:
     def __init__(self, config: SecurityMonitorConfig, emit_records: Callable[[list[dict[str, object]]], int]) -> None:
         self._config = config
@@ -243,23 +271,15 @@ class ResourceMonitor:
         logger.info("Resource monitor emitted incident (accepted_incidents=%s): %s", accepted, message)
 
     def _collect_snapshot(self) -> ResourceSnapshot:
-        load1, _, _ = os.getloadavg()
-        cpu_count = os.cpu_count() or 1
-        return ResourceSnapshot(
-            cpu_load_percent=(load1 / cpu_count) * 100.0,
-            memory_percent=_read_memory_percent(),
-            disk_percent=_read_disk_percent("/"),
-        )
+        return collect_resource_snapshot()
 
     def _detect_issues(self, snapshot: ResourceSnapshot) -> list[str]:
-        issues: list[str] = []
-        if snapshot.cpu_load_percent >= self._config.cpu_load_percent_threshold:
-            issues.append(f"CPU load {snapshot.cpu_load_percent:.1f}% >= {self._config.cpu_load_percent_threshold}%")
-        if snapshot.memory_percent >= self._config.memory_percent_threshold:
-            issues.append(f"Memory {snapshot.memory_percent:.1f}% >= {self._config.memory_percent_threshold}%")
-        if snapshot.disk_percent >= self._config.disk_percent_threshold:
-            issues.append(f"Disk / {snapshot.disk_percent:.1f}% >= {self._config.disk_percent_threshold}%")
-        return issues
+        return detect_resource_pressure(
+            snapshot,
+            cpu_threshold=self._config.cpu_load_percent_threshold,
+            memory_threshold=self._config.memory_percent_threshold,
+            disk_threshold=self._config.disk_percent_threshold,
+        )
 
 
 def _read_memory_percent() -> float:

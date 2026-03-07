@@ -1,0 +1,12 @@
+[Unit]
+Description=Deepbot Host Resource Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/deepbot-host-resource-monitor
+EnvironmentFile=/opt/deepbot-host-resource-monitor/.env.host-resource-monitor
+ExecStart=/usr/bin/python3 /opt/deepbot-host-resource-monitor/host_resource_monitor.py --verbose
+StandardOutput=append:/var/log/deepbot-host-resource-monitor/host-resource-monitor.log
+StandardError=append:/var/log/deepbot-host-resource-monitor/host-resource-monitor.log

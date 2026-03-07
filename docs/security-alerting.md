@@ -31,6 +31,7 @@ SECURITY_PORT_MONITOR_ENABLED=false
 
 - `deepbot` を Docker で動かし、Fluent Bit をホスト側で動かす場合は `SECURITY_ALERT_BIND_HOST=0.0.0.0` にしてください
 - `SECURITY_PORT_MONITOR_ENABLED` は、実行環境に `ss` があり、かつ監視対象のネットワーク名前空間を見られる場合だけ有効にしてください
+- Docker で `deepbot` を動かす場合、`SECURITY_RESOURCE_MONITOR_ENABLED=false` を推奨します。CPU/メモリ/ディスクは standalone の host resource monitor で監視した方がホスト全体を正しく見られます
 - `SECURITY_ALLOWLIST` を未設定にすると、既定値として `127.0.0.1,::1` が入ります
 - localhost からの SSH 検証を通したい場合は、明示的に空にしてください
 
@@ -132,10 +133,10 @@ sudo systemctl restart fluent-bit
 
 これらは `docker_high_risk_command` として通常の `docker_command_execution` から分離して通知できます。
 
-Fluent Bit 側では、現在使っている次のファイルに `audit.log` の tail input と分類ルールを追加済みです。
+Fluent Bit 側では、実際に運用している deployment ディレクトリの `fluent-bit.conf` と `parsers.conf` に `audit.log` の tail input と分類ルールを追加してください。リポジトリのテンプレートは次です。
 
-- `/home/masato/Agentic/host-security-watchdog/fluent-bit.conf`
-- `/home/masato/Agentic/host-security-watchdog/parsers.conf`
+- `infra/fluent-bit/fluent-bit.conf`
+- `infra/fluent-bit/parsers.conf`
 
 `auditd` 側の永続ルールは次に配置しています。
 
@@ -148,6 +149,8 @@ sudo ausearch -k priv_esc -ts recent
 sudo ausearch -k sshd_config -ts recent
 sudo ausearch -k identity -ts recent
 ```
+
+ホスト全体の CPU / メモリ / ディスク監視は、`deepbot` 本体から分離した standalone monitor を使う構成を推奨します。詳細は `docs/host-resource-monitor.md` を参照してください。
 
 ## 動作確認
 
